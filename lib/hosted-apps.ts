@@ -12,6 +12,7 @@
  * Imported by the window and the Mac server.
  */
 
+import type { GithubMirror } from "@/cloud/github-config";
 import { siteOf, workBot, workspaceOf, type Bot, type BotSite } from "./types";
 
 export type DeployState = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "superseded";
@@ -86,49 +87,11 @@ export type AppHosting = {
 };
 
 /**
- * Where an app's production lives on GitHub (AppHosting.github). `path`: the folder of the repo the app's files are
- * ("" the whole repo). `keep`: paths left alone either way (a path, or a folder ending in /): never sent to GitHub,
- * never taken from it (a preview's own password file; another app's client in a shared folder). `dispatch`: a workflow
- * to run after a push, for one that doesn't start on a push. `last`: where the two were last the same (Link, Publish,
- * or Bring in): `sha`, the GitHub commit; `ingot`, the Ingot changeset that matches it, which a preview must be at
- * or after to publish (lib/server/github-mirror.ts).
+ * Where an app's production lives on GitHub (AppHosting.github), and the one check of what the window sends for it: in
+ * cloud/github-config.ts, which Bops Cloud checks an Admin's setting with too (cloud/members.ts githubHere).
  */
-export type GithubMirror = {
-  repo: string;
-  branch: string;
-  path: string;
-  keep?: string[];
-  dispatch?: { workflow: string; inputs?: Record<string, string> };
-  /** (`keep`: the paths left alone when it was made: one taken off the list since needs a new Link.) */
-  last?: { sha: string; ingot: string; keep?: string[]; when: number };
-};
-
-const GH_REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
-const GH_BRANCH = /^(?!.*\.\.)(?!\/)(?!.*\/$)[A-Za-z0-9._/-]{1,200}$/;
-const GH_PATH = /^(?!.*\.\.)(?!\/)[A-Za-z0-9._/@ -]{0,300}$/;
-
-/** A GitHub mirror as the window sends it, cleaned, or why it won't do. `last` is the server's own (never taken from here). */
-export function cleanGithubMirror(v: unknown): { ok: Omit<GithubMirror, "last"> } | { why: string } {
-  const m = v as Partial<GithubMirror> | null;
-  const repo = typeof m?.repo === "string" ? m.repo.trim().replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "") : "";
-  if (!GH_REPO.test(repo)) return { why: "Which GitHub repo? Like OrgoAI/orgo-brandlord." };
-  const branch = typeof m?.branch === "string" && m.branch.trim() ? m.branch.trim() : "main";
-  if (!GH_BRANCH.test(branch)) return { why: "That isn't a branch name." };
-  const path = (typeof m?.path === "string" ? m.path.trim() : "").replace(/^\/+|\/+$/g, "");
-  if (!GH_PATH.test(path)) return { why: "That isn't a folder in the repo." };
-  const typed = Array.isArray(m?.keep) ? m.keep.filter((k): k is string => typeof k === "string").map((k) => k.trim().replace(/^\/+/, "")).filter(Boolean) : [];
-  const bad = typed.find((k) => !GH_PATH.test(k));
-  if (bad) return { why: `"${bad.slice(0, 80)}" can't be a path left alone (letters, digits, . _ - @ / and spaces; a folder ends in /).` };
-  const keep = [...new Set(typed)].slice(0, 50);
-  const w = m?.dispatch;
-  const workflow = typeof w?.workflow === "string" ? w.workflow.trim() : "";
-  if (workflow && !/^[A-Za-z0-9_.-]{1,100}\.ya?ml$/.test(workflow)) return { why: "That isn't a workflow file, like deploy.yml." };
-  const inputs =
-    w?.inputs && typeof w.inputs === "object"
-      ? Object.fromEntries(Object.entries(w.inputs).filter(([k, x]) => /^[A-Za-z0-9_-]{1,50}$/.test(k) && typeof x === "string" && x.length <= 200).slice(0, 10) as [string, string][])
-      : undefined;
-  return { ok: { repo, branch, path, ...(keep.length ? { keep } : {}), ...(workflow ? { dispatch: { workflow, ...(inputs && Object.keys(inputs).length ? { inputs } : {}) } } : {}) } };
-}
+export type { GithubMirror } from "@/cloud/github-config";
+export { cleanGithubMirror, keepsPoint } from "@/cloud/github-config";
 
 /** A site's deploy project left on a computer the app moved off (AppHosting.behind). */
 export type AppProjectBehind = { site: string; computerId: string; projectId: string };
@@ -472,6 +435,14 @@ export type AppDnsInput = { type: string; name: string; value: string; priority?
 export type AppDnsZone = { id: string; domain: string; serving: boolean; ttl: number | null; records: AppDnsRecord[]; error?: string; renewal?: AppRenewal };
 
 export type AppDomainStatus = "pending" | "verifying" | "active" | "failed" | "disabled";
+/** A domain's state in a word: the owner's Your Apps (components/app/hosted-apps.tsx DOMAIN_STATES) and a member's (shared-apps.tsx) alike. */
+export const DOMAIN_WORDS: Record<AppDomainStatus, string> = {
+  pending: "Waiting for its DNS",
+  verifying: "Checking its DNS",
+  active: "Live",
+  failed: "Couldn't be verified",
+  disabled: "Turned off by Orgo",
+};
 
 /** One of the app's domains: one its computer serves on the app's port (orgo-web custom_domains.target_port). */
 export type AppDomain = {
@@ -587,7 +558,11 @@ export type AppSettingsAnswer = {
   said?: string;
   /** Of the Preview's (env=preview): Published's variables' names, so the window says which the Preview doesn't have. */
   prodEnv?: string[];
+  /** The variables it gets from Keys at each build (lib/server/app-keys.ts), names only; `missing`: Keys has none now. */
+  keyed?: AppKeyed[];
 };
+/** A variable an app gets from Keys: its name, the key's, and whether the link is the app's own or every app's. */
+export type AppKeyed = { name: string; key: string; from: "app" | "workspace"; missing?: true };
 export type AppSettingsChange = { ws: string; site?: string; env?: "preview" | "prod"; port?: number | string; install?: string; build?: string; start?: string; health?: string };
 export type AppEnvChange = { ws: string; site?: string; where?: AppEnv; env: Record<string, string | null> };
 
@@ -821,8 +796,13 @@ export type AppForMembers = {
   acts?: MemberAppAct[];
 };
 
-/** A member's act on an app, as the owner's Mac did it or refused it (lib/server/member-acts.ts). `env` "prod": an Admin's Publish or Roll back on Published. */
-export type MemberAppAct = { key: string; userId: string; name: string; act: "deploy" | "rollback" | "settings" | "domain"; site?: string; domain?: string; env?: "prod"; ok: boolean; said?: string; at: number };
+/**
+ * A member's act on an app, as the owner's Mac did it or refused it (lib/server/member-acts.ts). `env` "prod": an Admin's
+ * Publish or Roll back on Published. The GitHub ones (cloud/protocol.ts MemberGithubAct) are kept by Bops Cloud too: where
+ * it publishes ("github"), and a Link or Bring in while the app's computer does it (`going`), then how it went
+ * (cloud/turns.ts takeAppJob, finish).
+ */
+export type MemberAppAct = { key: string; userId: string; name: string; act: "deploy" | "rollback" | "settings" | "domain" | "github" | "githubLink" | "githubPull"; site?: string; domain?: string; env?: "prod"; ok: boolean; going?: true; said?: string; at: number };
 
 /** How much members are shown: apps, sites of each, changesets, deploys a site, and acts kept. */
 export const MEMBER_APPS = 30;
@@ -832,3 +812,78 @@ export const MEMBER_ACTS_KEPT = 10;
 
 /** An app's sites by name: its own (named as the app), then AppHosting.sites in order. */
 export const sitesOfHosting = (h: Pick<AppHosting, "sites">, name: string): string[] => [name, ...(h.sites ?? []).map((s) => s.name)];
+
+/* ---------------- What's going on with an app, in a sentence, and the one thing to press ---------------- */
+
+/** The one thing to press for an app now (undefined: nothing; it's up to date, or something is on its way). */
+export type AppNextAction = "update-preview" | "publish" | "connect-domain";
+
+/** What an app's status is made of, however the window has the app (the owner's HostedApp, or a member's SharedApp). */
+export type AppStatusInput = {
+  /** The newest changeset on main (null: nothing committed yet). */
+  head: string | null;
+  /** Its Preview: what it serves and its newest deploy's state (null: no Preview yet). */
+  preview: { serving: string | null; state: DeployState | null } | null;
+  /** Published: what it serves (on GitHub, the changeset last pushed) and its newest deploy's state. */
+  live: { serving: string | null; state: DeployState | null };
+  /** It has a domain Published can live on (or, on GitHub, a repo it's linked to). */
+  domain: boolean;
+  /** Published served something before (a legacy site with no domain publishes all the same). */
+  wasLive: boolean;
+  /** Its computer is gone, and its deploy projects with it. */
+  lost?: boolean;
+  /** Production is on GitHub, and whether it was linked there yet. */
+  github?: { linked: boolean };
+  /** How many changes on main are on the Preview but not live, when the history says (null or absent: not known). */
+  changes?: number | null;
+  /** The newest change's words, when there's one not live, for the long form. */
+  change?: string | null;
+};
+
+/**
+ * An app's status in one plain sentence: what the preview has, whether live is behind it, and what's on its way; with
+ * the one thing to press now (`action`) and how it reads (`tone`: quiet, something waits on the person, something is
+ * being done, or something failed). `detail` names the change that isn't live, for a page with the room for it.
+ */
+export function appStatus(i: AppStatusInput): { sentence: string; detail?: string; action?: AppNextAction; tone: "quiet" | "waits" | "working" | "failed" } {
+  const going = (s: DeployState | null | undefined) => s === "queued" || s === "running";
+  if (i.lost) return { sentence: "Its computer is gone. Update the preview to give it a new home.", action: "update-preview", tone: "waits" };
+  if (!i.head) return { sentence: "Nothing built yet.", tone: "quiet" };
+  if (going(i.preview?.state)) return { sentence: "Updating the preview…", tone: "working" };
+  if (going(i.live.state)) return { sentence: i.github ? "Pushing to GitHub…" : "Publishing…", tone: "working" };
+  // What the preview holds that isn't live is there to publish, the newest change or an earlier version put back on it
+  // (Restore): the preview is "behind" only while it has nothing, or what's live already, and the newest change isn't on it.
+  const holds = !!i.preview?.serving && i.preview.serving !== i.live.serving;
+  const behind = !i.preview?.serving || (i.preview.serving !== i.head && !holds);
+  const canLive = i.domain || i.wasLive || !!i.github;
+  // A failed preview update leaves the preview serving what it did: when that isn't live and can go live, publishing it
+  // is still the press (the failed build is retried with Update preview, beside it or in Technical details).
+  if (i.preview?.state === "failed")
+    return holds && canLive && (!i.github || i.github.linked)
+      ? { sentence: "The last preview update failed. What the preview still has can be published.", action: "publish", tone: "failed" }
+      : { sentence: "The last preview update failed.", action: "update-preview", tone: "failed" };
+  // (The press that can go through now: the preview to update first when it's behind, else publishing again.)
+  if (i.live.state === "failed") return { sentence: "The last publish failed.", action: behind ? "update-preview" : "publish", tone: "failed" };
+  if (behind || !i.preview) return { sentence: "The preview is behind the latest change.", action: "update-preview", tone: "waits" };
+  if (i.github && !i.github.linked) return { sentence: "The preview is ready. Link it to GitHub to publish.", tone: "waits" };
+  if (i.preview.serving === i.live.serving) return canLive ? { sentence: "Live and up to date.", tone: "quiet" } : { sentence: "Not published yet.", action: "connect-domain", tone: "waits" };
+  if (!canLive) return { sentence: "The preview is ready. Connect a domain to publish it.", action: "connect-domain", tone: "waits" };
+  // (An earlier version put back on the preview, to go back to: the history counts no change between live and it.)
+  if (i.preview.serving !== i.head && i.changes === 0) return { sentence: "The preview has an earlier version than live.", ...(i.change ? { detail: i.change } : {}), action: "publish", tone: "waits" };
+  const n = i.changes;
+  const sentence = n == null ? "The preview has changes that aren't live." : n === 1 ? "The preview has 1 change that isn't live." : `The preview has ${n} changes that aren't live.`;
+  return { sentence, ...(i.change ? { detail: i.change } : {}), action: "publish", tone: "waits" };
+}
+
+/**
+ * How many changes on main sit between what's live and what the preview serves, from the history (newest first):
+ * null when either isn't in it (an older page, or nothing live yet), 0 when they're the same.
+ */
+export function changesBetween(commits: { id: string }[], live: string | null, preview: string | null): number | null {
+  if (!preview) return null;
+  const p = commits.findIndex((c) => c.id === preview);
+  if (p < 0) return null;
+  if (!live) return null;
+  const l = commits.findIndex((c) => c.id === live);
+  return l < 0 ? null : Math.max(0, l - p);
+}

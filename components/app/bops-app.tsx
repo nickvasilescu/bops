@@ -22,6 +22,7 @@ import { crmOpen } from "@/lib/crm-access";
 import { categoriesOpen } from "@/lib/memory-categories";
 import { tagsOf } from "@/lib/routine-catalog";
 import { CrmView, OpenCrm } from "./crm";
+import { OpenSkill } from "./skill-drafts";
 import { BoppyLoading, BotMoodsFrom, CallTalking, Mascot, talkingStore } from "./mascot";
 import { MemoryView, type MemoryOpen } from "./memory-categories";
 import { BROWSER_TAB, BrowserGoTo, browserTabOf, browsesHere, CHAT_TAB, electron, forgetTab, hostOf, isReading, LocalOnly, memoryAgain, NewTab, OpenBotLocal, OpenInBrowser, OpenLink, OpenPreview, TabBar, WebTab, type BrowserGo, type PanelTab, type PreviewOpened } from "./panel-tabs";
@@ -863,22 +864,22 @@ function Bops({ state }: { state: AppState | null }) {
       openComputer(fresh.botId);
     }
   };
-  const openChat = (id: string) => {
+  const openChat = (id: string, stay = false) => {
     setChatId(id);
     setPrefill(null);
     setNewThreadFor(null);
     setThreadId(null);
     setComposing(false);
     setFocus(false);
-    setActive(CHAT_TAB);
+    if (!stay) setActive(CHAT_TAB);
   };
   /**
    * Ask a bot something (an example on Routines, or Ask <name>): its chat, with `text` in the message box
    * to change and send, never sent by itself, and the box focused.
    */
-  const askBot = (botId: string, text?: string) => {
+  const askBot = (botId: string, text?: string, stay = false) => {
     const id = botChatId(botId);
-    openChat(id);
+    openChat(id, stay);
     if (state.chats.some((c) => c.id === id)) setPrefill({ chatId: id, text: text ?? "", at: Date.now() });
   };
   /** The task Add app started (hosted-apps.tsx): its thread once the window has it, else its bot's chat, where its chip is. */
@@ -1034,6 +1035,7 @@ function Bops({ state }: { state: AppState | null }) {
     <OpenMadeApp.Provider value={openMadeApp}>
     <OpenHostedApp.Provider value={openHostedApp}>
     <OpenSettings.Provider value={(at) => openSettings(at)}>
+    <OpenSkill.Provider value={openSkills}>
     <OpenAppTask.Provider value={openAppTask}>
     <OpenBotComputer.Provider value={openBotComputer}>
     <OpenPreview.Provider value={openPreview}>
@@ -1294,7 +1296,7 @@ function Bops({ state }: { state: AppState | null }) {
                   ) : tab?.kind === "made-apps" ? (
                     <MadeAppsHome state={state} ws={tab.ws} />
                   ) : tab?.kind === "hosted-app" ? (
-                    <HostedAppTab key={tab.id} state={state} ws={tab.ws} name={tab.name} onAsk={askBot} />
+                    <HostedAppTab onBack={openApps} key={tab.id} state={state} ws={tab.ws} name={tab.name} onAsk={(id, text) => askBot(id, text, true)} />
                   ) : tab?.kind === "crm" ? (
                     // These two pages fade in from here (the others in their own files). The key is on the
                     // wrapper, so the page remounts exactly when it did before.
@@ -1472,6 +1474,7 @@ function Bops({ state }: { state: AppState | null }) {
     </OpenPreview.Provider>
     </OpenBotComputer.Provider>
     </OpenAppTask.Provider>
+    </OpenSkill.Provider>
     </OpenSettings.Provider>
     </OpenHostedApp.Provider>
     </OpenMadeApp.Provider>

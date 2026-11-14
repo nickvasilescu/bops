@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { appsOpen } from "@/lib/apps-access";
 import { botChatId, live as isLive, routineSent, siteBotOf, siteOf, workBot, workspaceOf, type Session, type Workspace } from "@/lib/types";
-import { appCoders, appEnvOf, copyBotOf, DEV_PORT, DNS_TYPES, dnsNeeds, ENV_NAME, ENV_RESERVED, isCopyName, isSiteName, localAddress, localsOf, localWords, LOG_LINE, LOG_LINES, MAX_SITES, offersInOrder, PASS_COOKIE, REGISTRANT_FIELDS, subdomainTyped, cleanGithubMirror} from "@/lib/hosted-apps";
+import { appCoders, appEnvOf, copyBotOf, DEV_PORT, DNS_TYPES, dnsNeeds, ENV_NAME, ENV_RESERVED, isCopyName, isSiteName, localAddress, localsOf, localWords, LOG_LINE, LOG_LINES, MAX_SITES, offersInOrder, PASS_COOKIE, REGISTRANT_FIELDS, subdomainTyped, cleanGithubMirror, keepsPoint } from "@/lib/hosted-apps";
 import { screenMap } from "@/lib/screens";
 import type {
   AddAppAnswer,
@@ -22,6 +22,7 @@ import type {
   AppDomainRemoved,
   AppDomainsAnswer,
   AppHosting,
+  AppKeyed,
   AppProjectBehind,
   AppRenewal,
   AppRestoreConfirm,
@@ -91,13 +92,15 @@ import {
 import { onRunner, selfHosted } from "./persist";
 import { hostingChangeAllowed, hostingScope, type Blob } from "@/cloud/computer-scope";
 import { isLabelOf, labelGiven, newLabel } from "./app-labels";
-import { GITHUB_KEY, linkMirror, MirrorError, mirrorPublish, mirrorPull } from "./github-mirror";
+import { GITHUB_KEY, linkAndSay, MirrorError, mirrorPublish, mirrorPull } from "./github-mirror";
 import { appFolder, authorOf, byBots, changesTo, dropToken, ensureIngotCli, folderChanges, hasToken, ingot, INGOT_BIN, INGOT_MCP, IngotError, ingotWorkspace, isRepoName, msOf, NO_PROJECT, readyFolder, repoNameFor, stillOurs, SWAPPED, type IngotChange, type IngotChangeset, type IngotRepo } from "./ingot";
 import { addMessage, bot, flushState, getState, ownerName, sameState, session, update } from "./store";
 import { tailnetUp } from "./tailnet";
 import { closeForward, ForwardError, forwardOf, macPortBusy, openForward, type Carrier } from "./local-preview";
 import { SshError, sshTunnel } from "./computer-ssh";
 import { sharedOpen } from "./shared";
+import { sharePreviewPassword } from "./preview-password-share";
+import { PREVIEW_PASSWORD_ABC, PREVIEW_PASSWORD_LENGTH } from "@/cloud/protocol";
 
 /**
  * Apps a workspace builds and runs on the web (lib/hosted-apps.ts). Each one is an Ingot repo in the
@@ -174,6 +177,10 @@ const g = globalThis as unknown as {
   bopsPasswordsSetting?: Map<string, Promise<boolean | undefined>>;
   /** Until when a link Orgo turned a password down for isn't asked again, by the same key (passwordNow). */
   bopsPasswordRefused?: Map<string, number>;
+  /** The Preview deploys this Bops queued and watches until they go live, by "<computer>/<project>" (watchPreview). */
+  bopsPreviewWatches?: Map<string, { deploy: string; stop: () => void }>;
+  /** Tests: how often a watched Preview deploy is read, and for how long (watchPreview). */
+  bopsPreviewWatchMs?: { every?: number; for?: number };
 };
 
 /** A changeset's id: the sha256 of its canonical JSON. */
@@ -1264,8 +1271,8 @@ function leftOversOf(h: AppHosting, name: string, repo: string, projects: OrgoDe
 /**
  * Every site's Preview of an app, by site, as the Apps page shows it, and its left overs: found in its computer's
  * lists, then each Preview project read on its own (the list carries only the computer's newest few deploys, so
- * what one serves is read from its own), and its password as it should be (passwordNow: one set when its link has
- * none, a new one once another deploy went live there). Null when Orgo couldn't say.
+ * what one serves is read from its own), and its password as it should be (passwordNow "first": one set when its link
+ * has none, never a new one for a deploy that went live: watchPreview gives that). Null when Orgo couldn't say.
  */
 async function previewsOf(
   wsId: string,
@@ -1359,8 +1366,8 @@ function linkRefused(e: unknown): HostedAppError | undefined {
  * label; else its state copy's label is used again; else a new one. A label someone took meanwhile gets a new one,
  * said in `said` (the user adds the new link to Google sign in). `given`: a name the owner chose ahead, used when
  * the site has no Preview yet (once it has one, its name never changes). `env`: the user's variables to make it
- * with, on top of the sign in seeds (seedsFor). Its link has a password once it's there (passwordNow), unless the
- * owner turned it off.
+ * with, on top of the sign in seeds (seedsFor). Its link has a password once it's there (passwordNow "made": one set
+ * at once when it has none), unless the owner turned it off.
  */
 async function ensurePreview(
   wsId: string,
@@ -1388,7 +1395,7 @@ async function ensurePreview(
     throw new HostedAppError(`Its preview is at ${found.url?.url ?? found.label} already, and its link never changes.`, 409, { code: "PREVIEW_NAMED" });
   /** What it answers, its link's password set first when it has none (best effort). */
   const locked = async <T extends { project: OrgoDeployProject; url: OrgoPublicUrl }>(r: T): Promise<T> => {
-    await passwordNow(wsId, name, prod.site, c, r.url, r.project.current?.id ?? null, ours);
+    await passwordNow(wsId, name, prod.site, c, r.url, r.project.current?.id ?? null, ours, "made");
     return r;
   };
   /**
@@ -1576,6 +1583,8 @@ async function sendPreview(
       if (got instanceof Error) throw refused(got);
       if (!got.enabled) throw new HostedAppError(got.why, 403);
       deployed.push({ site, deployment: got.value, url: pv.url.url });
+      // Its link gets a new password once this deploy is live, from this Bops (watchPreview).
+      previewQueued(wsId, name, site, prod.computerId, pv.project.id, pv.url, got.value, ours);
     } catch (e) {
       if (deployed.length && ours()) keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
       throw partly(e, todo.length, deployed.map((d) => d.site), site, " to its preview");
@@ -1589,14 +1598,15 @@ async function sendPreview(
 
 /**
  * A site's Preview project as orgo-web has it now (null: none yet), read for what's asked of it (logs, settings,
- * variables, a rollback), with Published's project as the computer lists it (for its variables' names).
+ * variables, a rollback), with Published's project as the computer lists it (for its variables' names), and its link
+ * as Orgo lists it (`link`, when it has one: a rollback's or a new port's build gets a new password once it's live).
  */
 async function previewOf(
   wsId: string,
   name: string,
   ours: () => boolean,
   site?: unknown,
-): Promise<{ h: SiteHosting & { projectId: string }; p: OrgoDeployProject; prod: OrgoDeployProject | undefined } | null> {
+): Promise<{ h: SiteHosting & { projectId: string }; p: OrgoDeployProject; prod: OrgoDeployProject | undefined; link?: OrgoPublicUrl } | null> {
   if (!workspace(wsId)) throw new HostedAppError("That workspace is gone.", 404);
   const h = isRepoName(name) ? hostingAt(wsId, name, site) : undefined;
   if (!h) throw new HostedAppError(NO_APP, 404);
@@ -1613,7 +1623,7 @@ async function previewOf(
   const p = await deploys.project(h.computerId, found.project.id).catch((e: unknown) => Promise.reject(refused(e)));
   held(ours);
   if (!p.enabled) throw new HostedAppError(p.why, 403);
-  return { h: { ...h, projectId: found.project.id, ...(found.url ? { url: found.url.url } : {}) }, p: p.value, prod: prodIn(list, all, name, h.site, repo) };
+  return { h: { ...h, projectId: found.project.id, ...(found.url ? { url: found.url.url } : {}) }, p: p.value, prod: prodIn(list, all, name, h.site, repo), ...(found.url ? { link: found.url } : {}) };
 }
 
 /* ---------------- Its Preview's password ---------------- */
@@ -1621,20 +1631,30 @@ async function previewOf(
 /*
  * Each site's Preview asks for a password (orgo-web's gate on its public URL: a browser without its cookie gets a
  * password page first), unless the owner turned it off for that site (AppHosting.passwordOff). Bops sets one as soon
- * as the link exists or is found without one, on any Mac (passwordNow: ensurePreview, and each read of the Apps page),
- * and a new one once each Preview deploy goes live (its live deploy is another than the one the last was set with:
- * AppHosting.passwordSet); a deploy that fails or stops leaves it as it was, and Published never has one. Orgo keeps
- * the password: Bops keeps only the owner's choice and when it set one. A link Orgo can't tell about (`protected`
- * absent: an orgo-web from before passwords) is left alone, and one Orgo can't put a password on yet (503
+ * as the link exists (the Bops that made it: passwordNow "made", in ensurePreview) or is found without one, on any Mac
+ * or runner (passwordNow "first": each read of the Apps page, the window's read of it, once it's a minute old), so a
+ * Preview is never public; a read never makes a new one because another deploy went live. A new one comes once with
+ * each Preview deploy, from the Bops that queued it, as it goes live (watchPreview: that deploy is the project's current
+ * one; passwordNow "rotate", recorded on AppHosting.passwordSet; one Orgo didn't take is tried again at the watch's next
+ * look); a deploy that fails or stops, or that a newer one replaced, leaves it as it was, and Published never has one. Orgo
+ * keeps the password: Bops keeps only the owner's choice and when it set one. A link Orgo can't tell about
+ * (`protected` absent: an orgo-web from before passwords) is left alone, and one Orgo can't put a password on yet (503
  * PASSWORD_UNAVAILABLE, before its migration) or that the user's key can't change (403) is left alone for an hour,
- * so nothing is tried again and again. The password is the owner's to see beside the link, in the window alone
- * (PreviewPassword), and members' the owner gave Your Apps at Write (lib/server/apps-for-members.ts): never in a
- * bot's chat or prompt.
+ * so nothing is tried again and again.
+ *
+ * Whoever sets it shares it: each password set, the very one sent to Orgo, goes to Bops Cloud too (preview-password-share.ts),
+ * which keeps it for the people the owner gave Your Apps at Write, Admins too (cloud/preview-passwords.ts). A runner
+ * signs in as its computer, which orgo-web lets set a public URL's password but never read it, so what a runner set
+ * reaches them only that way, whether the owner's Mac is on or not. The password is the owner's to see beside the
+ * link, in the window alone (PreviewPassword), and those people's: never in a bot's chat or prompt, nor in a log.
  */
 
-/** A Preview password's characters: letters and digits, without the ones that look alike (0, O, o, 1, l, I). */
-const PASSWORD_ABC = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"; // gitleaks:allow (an alphabet, not a key)
-export const PASSWORD_LENGTH = 7;
+/**
+ * A Preview password's characters: letters and digits, without the ones that look alike (0, O, o, 1, l, I), and how many
+ * it has: Bops Cloud's rule for one (cloud/protocol.ts PREVIEW_PASSWORD), which takes no other.
+ */
+const PASSWORD_ABC = PREVIEW_PASSWORD_ABC;
+export const PASSWORD_LENGTH = PREVIEW_PASSWORD_LENGTH;
 
 /** A new Preview password: PASSWORD_LENGTH random characters of PASSWORD_ABC, case sensitive, at least one a letter and one a digit. */
 export function newPassword(rand: (n: number) => number = (n) => randomInt(n)): string {
@@ -1676,45 +1696,236 @@ async function onePassword<T extends boolean | undefined>(key: string, fn: () =>
 }
 
 /**
- * A site's Preview password as it should be now, from its link as Orgo listed it (`url`) and the deploy live on its
- * Preview (`live`: its project's current one, null: none): one set when Orgo says the link has none, a new one when
- * another deploy went live since the last was set (passwordSet), the record kept. Nothing when the owner turned it
- * off, Orgo can't tell, Orgo turned its link off, or Orgo turned a set down lately (PASSWORD_AGAIN_MS, or
- * PASSWORD_LATER_MS). Answers whether the link asks for one now (undefined: Orgo can't tell). Best effort: it never
- * throws.
+ * How long a link just made is left to the Bops that made it (passwordNow "first"): that one sets its first password as
+ * soon as its project is made (ensurePreview), and a read elsewhere meanwhile (the owner's Apps page, another Mac of the
+ * owner's) would set another, whose share to Bops Cloud could land after the one Orgo kept. By Orgo's created_at, either
+ * way from this clock, so one a little off only shortens or lengthens the wait.
  */
-async function passwordNow(wsId: string, name: string, site: string, computerId: string, url: OrgoPublicUrl, live: string | null, ours: () => boolean): Promise<boolean | undefined> {
+const FIRST_WAIT_MS = 60_000;
+const justMade = (url: OrgoPublicUrl) => {
+  const made = Date.parse(url.created_at ?? "");
+  return Number.isFinite(made) && Math.abs(Date.now() - made) < FIRST_WAIT_MS;
+};
+
+/** Orgo didn't answer a set of a link's password, or answered 5xx (not PASSWORD_UNAVAILABLE): it may have made it all the same. */
+const setMaybeMade = (e: unknown) => !(e instanceof OrgoError) || (e.status >= 500 && !passwordUnavailable(e));
+
+/**
+ * A link's password set to `password` (null: none), sent once more, the same, when Orgo didn't answer or answered 5xx: it
+ * may have made the first (a set that timed out after Orgo took it), and the same one again is harmless. So what Bops
+ * shares is what the link has, rather than a password nobody knows (a runner can't read one back).
+ */
+async function setPasswordSure(computerId: string, urlId: string, password: string | null) {
+  try {
+    return await publicUrls.setPassword(computerId, urlId, password);
+  } catch (e) {
+    if (!setMaybeMade(e)) throw e;
+    return publicUrls.setPassword(computerId, urlId, password);
+  }
+}
+
+/**
+ * How passwordNow goes. "first" (a read of the link: the Apps page, the window's password) sets one only when Orgo says
+ * the link has none, and not while it's just made (FIRST_WAIT_MS: the Bops that made it sets it); "made" (ensurePreview,
+ * on the link it just made or found) the same, at once; neither ever sets one because another deploy went live.
+ * "rotate" (watchPreview, once the Preview deploy this Bops queued is live) sets a new one in place of the one the link
+ * has, unless one was set for that deploy already.
+ */
+type PasswordMode = "first" | "made" | "rotate";
+
+/** What passwordNow did: whether the link asks for one now (`on`; undefined: Orgo can't tell), and `again` when a rotation didn't go through for now (Orgo didn't take it), for its watch to try at its next look. */
+type PasswordDone = { on: boolean | undefined; again?: true };
+
+/**
+ * A site's Preview password as it should be now, from its link as Orgo listed it (`url`) and the deploy live on its
+ * Preview (`live`: its project's current one, null: none), by `mode`, the record kept (passwordSet: when, and for what
+ * was live). Each password set goes to Bops Cloud too, exactly as it went to Orgo (sharePreviewPassword), for the people
+ * at Write. Nothing when the owner turned it off, Orgo can't tell, Orgo turned its link off, or Orgo turned a set down
+ * lately (PASSWORD_AGAIN_MS, or PASSWORD_LATER_MS). Answers whether the link asks for one now (undefined: Orgo can't
+ * tell). Best effort: it never throws.
+ */
+async function passwordNow(
+  wsId: string,
+  name: string,
+  site: string,
+  computerId: string,
+  url: OrgoPublicUrl,
+  live: string | null,
+  ours: () => boolean,
+  mode: Exclude<PasswordMode, "rotate"> = "first",
+): Promise<boolean | undefined> {
+  return (await passwordAsked(wsId, name, site, computerId, url, live, ours, mode)).on;
+}
+
+/** passwordNow, saying what it did (PasswordDone): what watchPreview calls, in "rotate". */
+async function passwordAsked(wsId: string, name: string, site: string, computerId: string, url: OrgoPublicUrl, live: string | null, ours: () => boolean, mode: PasswordMode): Promise<PasswordDone> {
   const key = `${computerId}/${url.id}`;
-  const was = settingPassword.get(key);
-  if (was) return was;
-  if (typeof url.protected !== "boolean") return undefined;
+  // (A read while one is being set answers as that set does; a rotation waits for it, then goes: onePassword.)
+  const was = mode !== "rotate" ? settingPassword.get(key) : undefined;
+  if (was) return { on: await was };
+  if (typeof url.protected !== "boolean") return { on: undefined };
   const s = siteNow(wsId, name, site, computerId);
-  if (!s || s.passwordOff || url.disabled || !ours()) return url.protected;
-  if (url.protected) {
+  if (!s || s.passwordOff || url.disabled || !ours()) return { on: url.protected };
+  if (mode !== "rotate" && url.protected) {
     // (One set before Bops kept when: taken as set for what's live now.)
     if (!s.passwordSet) keepSite(wsId, name, site, (x) => ({ ...x, passwordSet: { at: Date.now(), live } }));
-    if (!s.passwordSet || !live || s.passwordSet.live === live) return true;
+    return { on: true };
   }
+  // (Just made, here or by another Bops: the one that made it sets it.)
+  if (mode === "first" && justMade(url)) return { on: false };
+  if (mode === "rotate") {
+    // (Set for this deploy already: the owner's New password as it went live, say.)
+    if (live && s.passwordSet?.live === live) return { on: url.protected };
+    // A rotation replaces the password the link has. One that has none was turned off on another Bops of the owner's
+    // whose choice hasn't reached this one yet (its record still says one was set): never set again here. Or its first
+    // set never went through (none kept): set now, so a Preview going live is never public.
+    if (!url.protected && s.passwordSet) return { on: false };
+  }
+  // Orgo turned one down lately: not asked again yet. A rotation waits out only the hour (Orgo can't take one at all, or
+  // the key can't), as its watch tries again at its next look rather than on every read of the page.
   const until = passwordRefused.get(key);
-  if (until && Date.now() < until) return url.protected;
-  return onePassword(
+  if (until && Date.now() < until && (mode !== "rotate" || until - Date.now() > PASSWORD_AGAIN_MS)) return { on: url.protected };
+  const said = { again: false };
+  const on = await onePassword(
     key,
     async () => {
-      // (Read again: the owner may have turned it off meanwhile.)
-      if (siteNow(wsId, name, site, computerId)?.passwordOff) return url.protected;
-      const r = await publicUrls.setPassword(computerId, url.id, newPassword()).catch((e: unknown) => e as Error);
+      // (Read again: the owner may have turned it off meanwhile, or the set waited for was for this deploy.)
+      const now = siteNow(wsId, name, site, computerId);
+      if (!now || now.passwordOff) return url.protected;
+      if (mode === "rotate" && live && now.passwordSet?.live === live) return true;
+      const password = newPassword();
+      const r = await setPasswordSure(computerId, url.id, password).catch((e: unknown) => e as Error);
       if (!ours()) return url.protected;
       if (r instanceof Error || !r.enabled || r.value.protected === false) {
-        passwordRefused.set(key, Date.now() + (passwordUnavailable(r) ? PASSWORD_LATER_MS : PASSWORD_AGAIN_MS));
+        const later = passwordUnavailable(r);
+        passwordRefused.set(key, Date.now() + (later ? PASSWORD_LATER_MS : PASSWORD_AGAIN_MS));
+        // (Not again for an Orgo that can't take one, nor one whose hosting is closed here.)
+        said.again = !later && (r instanceof Error || r.enabled);
         return url.protected;
       }
       passwordRefused.delete(key);
+      // (Shared first: the link has it now, whatever happens to the record.)
+      void sharePreviewPassword({ ws: wsId, app: name, site, url: url.url, password });
       keepSite(wsId, name, site, (x) => ({ ...x, passwordSet: { at: Date.now(), live } }));
       return true;
     },
     url.protected,
   );
+  return { on, ...(said.again && mode === "rotate" ? { again: true as const } : {}) };
 }
+
+/* ---------------- A new Preview password as each Preview deploy goes live ---------------- */
+
+/** How often a Preview deploy this Bops queued is read until it's live, and how long at most. */
+const WATCH_EVERY_MS = 10_000;
+const WATCH_FOR_MS = 20 * 60_000;
+/** A deploy that will never go live. */
+const ENDED = new Set(["failed", "cancelled", "superseded", "stopped"]);
+
+type PreviewWatch = { deploy: string; stop: () => void };
+const watching = (g.bopsPreviewWatches ??= new Map<string, PreviewWatch>());
+const watchBox = (g.bopsPreviewWatchMs ??= {});
+
+/**
+ * Watch a Preview deploy this Bops just queued (`deploy`, Orgo's answer to it: on site `site`'s Preview project
+ * `projectId` on `computerId`, whose link is `urlId`) until it goes live, then give the link a new password, once
+ * (passwordNow "rotate", shared as every set is). One watch a project, by its computer and project: a newer deploy's
+ * replaces an older one's (Orgo replaces a deploy still queued with a newer one, and only the newest goes live). Its
+ * project is read on its own every WATCH_EVERY_MS, for WATCH_FOR_MS at most (never the computer's list, which carries
+ * only its newest few deploys): live once its current deploy is this one (or, for a rollback, the release it puts back,
+ * `release`, with this one done). It stops with nothing set once this deploy failed, was stopped or replaced, another
+ * newer one is live, the app or the site is gone or lost its computer, its password was turned off, its link is gone
+ * or off, or another account's state came in (`ours`). A set Orgo didn't take just now (it didn't answer, a 5xx) is
+ * tried again at a later look, each wait twice the last, while this deploy is still the live one and the watch lasts.
+ *
+ * In memory only: one that dies with this process (Bops quit, the computer asleep) leaves that deploy with the
+ * password it had, which everyone with Your Apps at Write has already, and the next Preview deploy gets a new one.
+ */
+function watchPreview(o: { wsId: string; name: string; site: string; computerId: string; projectId: string; urlId: string; deploy: OrgoDeployment; release?: string; ours: () => boolean }) {
+  const key = `${o.computerId}/${o.projectId}`;
+  watching.get(key)?.stop();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stopped = false;
+  const w: PreviewWatch = {
+    deploy: o.deploy.id,
+    stop: () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      if (watching.get(key) === w) watching.delete(key);
+    },
+  };
+  watching.set(key, w);
+  const until = Date.now() + (watchBox.for ?? WATCH_FOR_MS);
+  const still = () => !stopped && o.ours();
+  /** One read of its project: "done" once it's set or never will be, "again" when Orgo didn't take the set just now, else "wait". */
+  const look = async (): Promise<"done" | "wait" | "again"> => {
+    const s = siteNow(o.wsId, o.name, o.site, o.computerId);
+    if (!still() || !s || s.passwordOff) return "done";
+    const r = await deploys.project(o.computerId, o.projectId).catch((e: unknown) => e as Error);
+    if (!still()) return "done";
+    if (r instanceof Error) return gone(r) ? "done" : "wait";
+    if (!r.enabled) return "done";
+    const p = r.value;
+    const mine = [...(p.deployments ?? []), ...(p.current ? [p.current] : [])].find((d) => d.id === o.deploy.id);
+    const current = p.current ?? null;
+    const at = (d: { created_at?: string } | null | undefined) => Date.parse(d?.created_at ?? "") || 0;
+    let live: string | null = null;
+    if (current?.id === o.deploy.id) live = current.id;
+    else if (o.release && current?.id === o.release && mine?.state === "succeeded") live = current.id;
+    if (!live) {
+      if (mine && ENDED.has(mine.state)) return "done";
+      // Another one is live that came after this one, and this one isn't still on its way: it never will be.
+      const going = mine?.state === "queued" || mine?.state === "running";
+      if (current && !going && at(current) >= at(mine ?? o.deploy)) return "done";
+      return "wait";
+    }
+    // Its link as Orgo lists it now: one gone or turned off since gets nothing.
+    const urls = await publicUrls.list(o.computerId).catch(() => null);
+    if (!still()) return "done";
+    if (!urls) return "wait";
+    if (!urls.enabled || !urls.value.enabled) return "done";
+    const url = (urls.value.public_urls ?? []).find((u) => u.id === o.urlId);
+    if (!url) return "done";
+    return (await passwordAsked(o.wsId, o.name, o.site, o.computerId, url, live, o.ours, "rotate")).again ? "again" : "done";
+  };
+  const every = watchBox.every ?? WATCH_EVERY_MS;
+  /** Sets Orgo didn't take in a row: each waits twice as long for the next look, up to 16 times WATCH_EVERY_MS. */
+  let misses = 0;
+  const next = (ms: number) => {
+    timer = setTimeout(() => {
+      // (What throws is the set itself, never a read: never tried again, so a link never gets one after another.)
+      void look()
+        .catch(() => "done" as const)
+        .then((r) => {
+          if (stopped) return;
+          if (r === "done" || Date.now() >= until) return w.stop();
+          misses = r === "again" ? misses + 1 : 0;
+          next(every * 2 ** Math.min(misses, 4));
+        });
+    }, ms);
+    timer.unref?.();
+  };
+  next(every);
+}
+
+/**
+ * A Preview deploy this Bops queued (`deploy`, Orgo's answer: a deploy, a rollback putting `release` back, a build for a
+ * new port), on site `site`'s Preview project and its link `url`: watched until it's live (watchPreview), unless that
+ * link can't have a password (an orgo-web from before passwords).
+ */
+function previewQueued(wsId: string, name: string, site: string, computerId: string, projectId: string, url: OrgoPublicUrl | undefined, deploy: OrgoDeployment | undefined, ours: () => boolean, release?: string) {
+  if (!url || typeof url.protected !== "boolean" || typeof deploy?.id !== "string" || !deploy.id) return;
+  watchPreview({ wsId, name, site, computerId, projectId, urlId: url.id, deploy, ...(release ? { release } : {}), ours });
+}
+
+/** Tests: how often and how long a Preview deploy is watched, the watches going now (by "<computer>/<project>": the deploy), and every one stopped. */
+export const previewWatchForTests = {
+  times: (t: { every?: number; for?: number }) => void Object.assign(watchBox, t),
+  now: () => new Map([...watching].map(([k, w]): [string, string] => [k, w.deploy])),
+  stopAll: () => {
+    for (const w of [...watching.values()]) w.stop();
+  },
+};
 
 /** When Bops last set a site's Preview password (PreviewSite.passwordAt), as kept now. */
 const passwordAtOf = (wsId: string, name: string, site: string) => {
@@ -1766,8 +1977,7 @@ async function passwordAnswer(computerId: string, url: OrgoPublicUrl, on: boolea
 
 /**
  * GET /api/hosted-apps/[name]/password: a site's Preview password and the cookie that opens its link (PreviewPassword),
- * as it should be first (passwordNow: set when it has none, a new one once another deploy went live). Nothing for a
- * site with no link yet.
+ * as it should be first (passwordNow "first": set when it has none). Nothing for a site with no link yet.
  */
 export async function previewPassword(wsId: string, name: string, site?: unknown): Promise<PreviewPassword> {
   const ours = sameState();
@@ -1789,7 +1999,7 @@ const PASSWORD_WORDS = {
  * POST /api/hosted-apps/[name]/password: a site's Preview password made new ("new": the link stays, a browser with
  * the old one asks again), or turned on (a new one) or off for that site, the owner's choice kept on its record.
  * Answers PreviewPassword. Refused while the app is being removed, for a site with no link yet, and where Orgo can't
- * put one on it.
+ * put one on it. The new one (or none, turned off) goes to Bops Cloud too, for the people at Write (sharePreviewPassword).
  */
 export async function changePreviewPassword(wsId: string, name: string, action: unknown, site?: unknown): Promise<PreviewPassword> {
   const ours = sameState();
@@ -1804,20 +2014,21 @@ export async function changePreviewPassword(wsId: string, name: string, action: 
   const on = await onePassword(
     key,
     async () => {
-      const r = await publicUrls
-        .setPassword(h.computerId, url.id, action === "off" ? null : newPassword())
-        .catch((e: unknown) =>
-          Promise.reject(
-            e instanceof OrgoError && e.status === 503 && e.code === "PASSWORD_UNAVAILABLE"
-              ? new HostedAppError(PASSWORD_WORDS.cant, 409)
-              : e instanceof OrgoError && e.status === 403
-                ? new HostedAppError(PASSWORD_WORDS.key, 403)
-                : refused(e),
-          ),
-        );
+      const password = action === "off" ? null : newPassword();
+      const r = await setPasswordSure(h.computerId, url.id, password).catch((e: unknown) =>
+        Promise.reject(
+          e instanceof OrgoError && e.status === 503 && e.code === "PASSWORD_UNAVAILABLE"
+            ? new HostedAppError(PASSWORD_WORDS.cant, 409)
+            : e instanceof OrgoError && e.status === 403
+              ? new HostedAppError(PASSWORD_WORDS.key, 403)
+              : refused(e),
+        ),
+      );
       held(ours);
       if (!r.enabled) throw new HostedAppError(r.why, 403);
       passwordRefused.delete(key);
+      // Shared as every set is (the new one, or none once it's off), so the people at Write have it at once.
+      void sharePreviewPassword({ ws: wsId, app: name, site: h.site, url: url.url, password });
       keepSite(wsId, name, h.site, ({ passwordOff: _off, passwordSet: _set, ...x }) => {
         void _off;
         void _set;
@@ -1981,45 +2192,87 @@ export async function setGithubMirror(wsId: string, name: string, v: unknown): P
         if (!x) return x;
         const was = x.github;
         // The same folder, with every path it left alone still left alone (more is fine): its point holds. Else Link again.
-        const keeps = (was?.keep ?? []).every((k) => (c.ok.keep ?? []).includes(k));
-        const same = was && was.repo === c.ok.repo && was.branch === c.ok.branch && was.path === c.ok.path && keeps;
-        return { ...x, github: { ...c.ok, ...(same && was?.last ? { last: was.last } : {}) } };
+        // (The rule Bops Cloud keeps an Admin's setting by too: cloud/github-config.ts keepsPoint.)
+        return { ...x, github: { ...c.ok, ...(keepsPoint(was, c.ok) && was?.last ? { last: was.last } : {}) } };
       });
     }
     return { app: await appNow(wsId, name, ours) };
   });
 }
 
-/** Link an app to its GitHub folder as both are now (github-mirror.ts linkMirror: only when they have the same files). */
-export async function linkGithubMirror(wsId: string, name: string): Promise<{ app: HostedApp }> {
+/**
+ * Link, or Bring in GitHub's changes, of an app (under withApp: nothing else under way on it), one way for everyone who
+ * may: the owner's own window (linkGithubMirror, pullGithubMirror), the owner's Mac for an Admin or a Member with App
+ * secrets (lib/server/member-acts.ts), and the app's own computer for one, the owner's Mac on or off (githubJob). Link
+ * (github-mirror.ts linkAndSay): GitHub has no file Ingot lacks or has otherwise; Bring in (mirrorPull): GitHub's version
+ * wins where both changed a file, Ingot's commit by `author`. Its point (github.last) is kept only while the setting it ran
+ * with is still the app's (sameMirror), the one change a computer's runner may make to it (cloud/computer-scope.ts).
+ */
+async function githubNow(wsId: string, name: string, act: "githubLink" | "githubPull", author: string): Promise<string> {
+  const cfg = hostingOf(wsId, name)?.github;
+  if (!cfg) throw new HostedAppError("Set where it lives on GitHub first.", 409, { code: "NOT_SET" });
+  const done = await (act === "githubLink" ? linkAndSay(wsId, name, cfg) : mirrorPull(wsId, name, cfg, author)).catch((e) => {
+    throw asAppError(e);
+  });
+  keepHosting(wsId, name, (x) => (x?.github && sameMirror(x, cfg) ? { ...x, github: { ...x.github, last: done.last } } : x));
+  return done.said;
+}
+
+/** Ingot's author for a person's GitHub act done by this Mac (X-Ingot-Author: "<who> via <the owner>"); a computer's are its token's. */
+export const personAuthor = (name: string) => `bops; ${name.replace(/[\u0000-\u001f\u007f;]+/g, " ").trim().slice(0, 80) || "Bops"}`;
+
+/** Link an app to its GitHub folder as both are now (github-mirror.ts linkAndSay: GitHub has nothing Ingot lacks or has otherwise). */
+export async function linkGithubMirror(wsId: string, name: string): Promise<{ app: HostedApp; said: string }> {
   const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
   if (!h) throw new HostedAppError(NO_APP, 404);
   const ours = sameState();
   return withApp(wsId, name, "deploy", async () => {
-    const cfg = hostingOf(wsId, name)?.github;
-    if (!cfg) throw new HostedAppError("Set where it lives on GitHub first.", 409);
-    const last = await linkMirror(wsId, name, cfg).catch((e) => {
-      throw asAppError(e);
-    });
-    keepHosting(wsId, name, (x) => (x?.github && sameMirror(x, cfg) ? { ...x, github: { ...x.github, last } } : x));
-    return { app: await appNow(wsId, name, ours) };
+    const said = await githubNow(wsId, name, "githubLink", authorOf(undefined));
+    return { app: await appNow(wsId, name, ours), said };
   });
 }
 
-/** Bring in GitHub's changes (github-mirror.ts mirrorPull), GitHub's version winning where both changed a file: the owner's word, from the Bops window. */
-export async function pullGithubMirror(wsId: string, name: string): Promise<{ app: HostedApp; said: string }> {
+/** Bring in GitHub's changes (github-mirror.ts mirrorPull), GitHub's version winning where both changed a file: the owner's word, from the Bops window; or a member's, as `author`. */
+export async function pullGithubMirror(wsId: string, name: string, author = authorOf(undefined)): Promise<{ app: HostedApp; said: string }> {
   const h = isRepoName(name) ? hostingOf(wsId, name) : undefined;
   if (!h) throw new HostedAppError(NO_APP, 404);
   const ours = sameState();
   return withApp(wsId, name, "deploy", async () => {
-    const cfg = hostingOf(wsId, name)?.github;
-    if (!cfg) throw new HostedAppError("Set where it lives on GitHub first.", 409);
-    const done = await mirrorPull(wsId, name, cfg, authorOf(undefined)).catch((e) => {
-      throw asAppError(e);
-    });
-    keepHosting(wsId, name, (x) => (x?.github && sameMirror(x, cfg) ? { ...x, github: { ...x.github, last: done.last } } : x));
-    return { app: await appNow(wsId, name, ours), said: done.said };
+    const said = await githubNow(wsId, name, "githubPull", author);
+    return { app: await appNow(wsId, name, ours), said };
   });
+}
+
+/** Whether a bot of workspace `wsId` on this computer was given the GitHub key (Bot.keys): the only way Orgo's broker lets it call GitHub. */
+const githubKeyHere = (wsId: string) => {
+  const here = (process.env.BOPS_RUNNER_COMPUTER ?? "").toLowerCase();
+  return getState().bots.some((b) => workspaceOf(b) === wsId && b.runsOn !== "mac" && (workBot(b, getState().bots).computerId ?? "").toLowerCase() === here && !!b.keys?.includes(GITHUB_KEY));
+};
+
+/**
+ * An app's GitHub job (cloud/turns.ts takeAppJob: Link, or Bring in GitHub's changes), asked by `by` from a shared
+ * workspace's Your Apps and checked by Bops Cloud, done on the app's own computer by its runner (lib/server/runner-chat.ts),
+ * with the owner's Mac on or off: Ingot with this computer's token, GitHub with its own sign in through Orgo's broker
+ * (the key never here). Only an app whose home is this computer (onThisComputer), with a bot of the workspace on it given
+ * the GitHub key (else said, before anything is read). How it went in words, for Your Apps and the bot's chat; never
+ * throws. It reads nothing more of the app after (appNow: some of Orgo's reads take no computer's sign in).
+ */
+export async function githubJob(botId: string, job: { act: "githubLink" | "githubPull"; app: string }, by: string): Promise<{ ok: boolean; said: string }> {
+  const b = bot(botId);
+  if (!b) return { ok: false, said: "That bot is gone." };
+  const wsId = workspaceOf(b);
+  const name = job.app;
+  try {
+    if (!isRepoName(name) || !hostingOf(wsId, name)) throw new HostedAppError(NO_APP, 404);
+    onThisComputer(wsId, name);
+    if (onRunner() && !githubKeyHere(wsId)) return { ok: false, said: `${b.name} has no GitHub key on this computer, so nothing was read from GitHub. Give it the GitHub key in Keys, then try again.` };
+    const said = await withApp(wsId, name, "deploy", () => githubNow(wsId, name, job.act, personAuthor(by)));
+    return { ok: true, said };
+  } catch (e) {
+    if (e instanceof HostedAppError || e instanceof MirrorError || e instanceof IngotError) return { ok: false, said: /[.!?]$/.test(e.message) ? e.message : `${e.message}.` };
+    console.warn(`[hosted-apps] github job ${name}: ${(e as Error).message}`);
+    return { ok: false, said: "That didn't go. Try again." };
+  }
 }
 
 /** A site's Published address: https://<the first active domain on its port>, or null. */
@@ -2203,6 +2456,14 @@ const deployOf = (d: OrgoDeployment): AppDeploy => ({
   canRollback: !!d.can_rollback && d.state === "succeeded",
 });
 
+/** What a project gets from Keys, as orgo-web names it (names only; anything else it sent is dropped). */
+const keyedOf = (v: unknown[]): AppKeyed[] =>
+  v.flatMap((x) => {
+    const { name, key, from, missing } = (x ?? {}) as Record<string, unknown>;
+    if (typeof name !== "string" || !ENV_NAME.test(name) || typeof key !== "string" || !key || (from !== "app" && from !== "workspace")) return [];
+    return [{ name, key, from, ...(missing === true ? { missing: true as const } : {}) }];
+  });
+
 /** A project's settings as the window shows them; `url`: its address (a Preview's link; Published's first active domain, or null). */
 const settingsOf = (p: OrgoDeployProject, url: string | null): AppSettingsAnswer => ({
   url,
@@ -2214,6 +2475,7 @@ const settingsOf = (p: OrgoDeployProject, url: string | null): AppSettingsAnswer
     ...(typeof p.health_path === "string" ? { health: p.health_path } : {}),
   },
   env: [...new Set((p.env_keys ?? []).filter((k) => typeof k === "string"))].sort(),
+  ...(Array.isArray(p.env_from_keys) ? { keyed: keyedOf(p.env_from_keys) } : {}),
   deploys: [...(p.deployments ?? [])]
     .sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0))
     .slice(0, DEPLOYS_SHOWN)
@@ -2373,6 +2635,10 @@ async function previewSettings(wsId: string, name: string, site: unknown, patch:
   const r = await deploys.change(project.computerId, project.id, patch).catch((e: unknown) => Promise.reject(settingsRefused(e)));
   held(ours);
   if (!r.enabled) throw new HostedAppError(r.why, 403);
+  // A new port builds its live release again: that build, when Orgo says it's on its way, gets a new password once it's live (watchPreview).
+  const built = got ? newest(r.value) : undefined;
+  if (got && built && built.id !== newest(got.p)?.id && (built.state === "queued" || built.state === "running"))
+    previewQueued(wsId, name, got.h.site, got.h.computerId, got.p.id, got.link, built, ours);
   return { ...settingsOf(r.value, project.url), prodEnv: envNames(got?.prod) };
 }
 
@@ -2488,7 +2754,8 @@ export async function rollbackApp(wsId: string, name: string, deployment: unknow
   if (typeof deployment !== "string" || !/^[\w-]{1,80}$/.test(deployment)) throw new HostedAppError("That isn't one of its deploys.", 400);
   const ours = sameState();
   const preview = appEnvOf(env) === "preview";
-  const got = preview ? await previewOf(wsId, name, ours, site) : await projectOf(wsId, name, ours, site);
+  const pv = preview ? await previewOf(wsId, name, ours, site) : null;
+  const got = preview ? pv : await projectOf(wsId, name, ours, site);
   if (!got) throw new HostedAppError("It hasn't been deployed yet.", 409);
   const d = (got.p.deployments ?? []).find((x) => x.id === deployment);
   if (!d) throw new HostedAppError("That isn't one of its recent deploys.", 404);
@@ -2500,6 +2767,8 @@ export async function rollbackApp(wsId: string, name: string, deployment: unknow
   if (!r.enabled) throw new HostedAppError(r.why, 403);
   // (The Preview's rollback: the app as Orgo has it now, the rollback queued there; Published's, as a deploy's answer.)
   if (preview) {
+    // Its link gets a new password once the release it puts back is live, as for any Preview deploy (watchPreview).
+    if (pv?.link) previewQueued(wsId, name, pv.h.site, pv.h.computerId, pv.p.id, pv.link, r.value, ours, deployment);
     keepHosting(wsId, name, (x) => x && { ...x, queuedAt: Date.now() });
     return { app: await appNow(wsId, name, ours) };
   }
@@ -4632,7 +4901,7 @@ export function appWork(botId: string, a: { app: string | null; name: string | n
       : `Work on ${owner}'s app ${name}. It's the Ingot repo ${repo} (Ingot is Orgo's source control; name it in full wherever a command takes a repo), and its working folder on this computer is ${dir}: Bops cloned it there, or pulled the newest into it, as this task started.`,
     `What to do: ${change}`,
     WHERE_THINGS_ARE(owner),
-    "1. Make the change in that folder. An app that runs a server listens on the port in $PORT, which Orgo sets when it deploys it and bops-local sets for its Local; a plain site needs only an index.html. Keep secrets out of the folder: .env files are never committed. Read its own address from AUTH_URL (or NEXTAUTH_URL) rather than writing one in: Bops sets it to its Local's address for its Local, its preview link for its Preview, and its domain once published.",
+    "1. Make the change in that folder. An app that runs a server listens on the port in $PORT, which Orgo sets when it deploys it and bops-local sets for its Local; a plain site needs only an index.html. Keep secrets out of the folder: .env files are never committed. Read its own address from AUTH_URL (or NEXTAUTH_URL) rather than writing one in: Bops sets it to its Local's address for its Local, its preview link for its Preview, and its domain once published. A key from the workspace's Keys (ANTHROPIC_API_KEY, say) comes to it as a variable on every deploy, and to its Local after its first Preview: read it from the environment, and never write a key into the folder, a commit or a chat.",
     `2. Run it as its Local and leave it running: bops-local start ${word} ${site} (it runs its dev script, else its start script, with hot reload, and prints a BOPS_LOCAL line whose fourth word is its port). ${owner} watches it live in Bops beside this chat while you save. Check each change with curl -i http://127.0.0.1:<that port>/. If it fails, bops-local status ${word} and /root/.bops/local/${word}--${site}.log say why. Don't run another server on that port, and don't stop its Local when you're done.`,
     `3. Commit it from the folder: ingot commit -m "<what changed, in one clear line>" (or the Ingot tools' repo_commit). ${SYNC_WORDS}`,
     ...(others ? [OTHERS_WORDS(name)] : []),
@@ -4801,6 +5070,46 @@ export function askDeploy(sessionId: string, app: { wsId: string; name: string }
   });
 }
 
+/** Where words name its Preview or a deploy (deploy it, redeploying, the Preview). */
+const NAMES_PREVIEW = /\b(?:re-?)?deploy\w*|\bpreviews?\b/gi;
+/**
+ * Said not to, in the same clause just before (don't put it on the Preview, never deploy, hold off on deploying, wait
+ * to deploy, but not on the Preview, keep it off the Preview, no deploy); "I don't see it on the Preview" isn't...
+ */
+const HOLD_BEFORE =
+  /(?:\b(?:(?:don['’]?t|do not|dont)(?!\s+(?:forget|see|think|know)\b)|never|without|hold off(?: on)?|wait (?:to|before|until)|no need to|(?:but|and) not)\s+(?:[\w'’-]+\s+){0,4}|\boff\s+(?:of\s+)?(?:the|its|our|my)\s+|\bno\s+)$/i;
+/** ...or just after (deploy it later). */
+const HOLD_AFTER = /^\s+(?:(?:it|this|that|them)\s+)?later\b/i;
+
+/**
+ * Whether the speaker's words, sent straight to a task on an app, say not to put its change on its Preview (askDeployAgain):
+ * no model reads them on the way (a reply to one of its messages, its reply box), so these words are what tell_task's
+ * deploy false is to the bot. "It's not on the Preview yet" or "the Preview still shows the old title" asks for it.
+ */
+export function keepsOffPreview(words: string): boolean {
+  for (const m of words.matchAll(NAMES_PREVIEW)) {
+    const at = m.index ?? 0;
+    const clause = words.slice(0, at).split(/[.?!;:\n]/).pop() ?? "";
+    if (HOLD_BEFORE.test(clause) || HOLD_AFTER.test(words.slice(at + m[0].length))) return true;
+  }
+  return false;
+}
+
+/**
+ * More asked of a task on an app that already put a change on its Preview (`from`: keepHeads and deployAfterTask set it
+ * only on a task asked to deploy, and deployAfterTask took that ask off once it deployed): its next commit goes there
+ * too (askDeploy), asked before the run is queued, so it ends with the deploy. A task started with deploy false (no
+ * `from`) stays as it is. For the speaker's own words sent to it: chat.ts tell_task (its deploy, on work_on_app's rule),
+ * and, with `words` (none said not to: keepsOffPreview), a reply to one of its messages (chat.ts continueThread), its
+ * reply box (app/api/sessions/[sessionId]/reply) and a member's reply there (member-acts.ts). Never for a note Bops
+ * sends it (signed in, its terminal closed, a takeover) or someone else's words.
+ */
+export function askDeployAgain(sessionId: string, words?: string) {
+  const x = session(sessionId)?.app;
+  if (!x || x.from === undefined || x.deployAfter || (words !== undefined && keepsOffPreview(words))) return;
+  askDeploy(sessionId, x);
+}
+
 /**
  * POST /api/hosted-apps (the Apps page's Add app): a new app, built by the workspace's main bot on its
  * computer, as work_on_app starts one (appWork, then a task through the normal task path), and put live once
@@ -4886,6 +5195,9 @@ export async function deployAfterTask(sessionId: string): Promise<void> {
   update((st) => {
     const x = appOfTask(st, sessionId);
     if (!x?.deployAfter) return;
+    // Picked up again while Ingot was asked (more asked of it: chat.ts tell_task, whose askDeploy found the ask still
+    // on): the ask stays for that run, whose end deploys its newest commit, this one's too.
+    if (st.sessions.find((y) => y.id === sessionId)?.status !== "done") return;
     delete x.deployAfter;
     if (head !== undefined) x.from = head;
     mine = true;
@@ -5001,6 +5313,13 @@ async function markIfGood(wsId: string, name: string, site: string, port: number
 /** What a bot says when an environment of an app didn't change (deploy_app, a task's deploy after): which one, why, and that nothing went live. */
 const unchanged = (env: "Preview" | "Published", name: string, why: string) => `${env} of ${name} not changed: ${why.trim().replace(/[.\s]+$/, "")}. Nothing went live.`;
 
+/**
+ * Whether deployForBot's words for a Publish say it went: "Published: publishing ..." (on Orgo) or "Published (on GitHub): ..."
+ * (the mirror pushed). Every refusal ("Published not changed: ...", unchanged's "Published of <app> not changed: ...", a
+ * partial failure's own message) is false. The chat says a publish that went as Bops (chat.ts deploy_app).
+ */
+export const publishWent = (said: string) => /^Published(?: \(on GitHub\))?: /.test(said);
+
 /** How many pages of an app's log (200 each) a short id is looked for in. */
 const LOOK_PAGES = 10;
 
@@ -5091,7 +5410,16 @@ async function previewForBot(wsId: string, name: string, id: string | undefined,
   // (Whether its link asks for one, as Orgo said in the read after the deploy.)
   const pv = (x: string) => (x === name ? now.preview : now.sites?.find((y) => y.name === x)?.preview);
   const locked = deployed.some((d) => pv(d.site)?.protected === true);
-  const after = `${locked ? "It asks for a password, a new one once this deploy is live, shown beside its Preview link in Bops. " : ""}Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on its domain once it looks right.`;
+  // Where Publish goes: GitHub, for an app whose production is there; else Published, said as not what visitors see
+  // while none of its domains points at Orgo yet (pending: a new one, or one still pointing at another server).
+  const gh = now.hosting?.github;
+  const waiting = !gh && !now.domain && now.domains?.length && now.domains.every((d) => d.status !== "active") ? now.domains.map((d) => d.domain) : [];
+  const publish = gh
+    ? `Published is as it was: once it looks right, say publish or press Publish in Your Apps to send what Preview serves to GitHub (${gh.repo}, ${gh.branch}), where its own deploy puts it live.`
+    : waiting.length
+      ? `Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on Published once it looks right. Visitors to ${waiting.join(" and ")} won't see it until ${waiting.length === 1 ? "its" : "their"} DNS points at Orgo.`
+      : "Published is as it was: say publish, or press Publish in Your Apps, to put what Preview serves on its domain once it looks right.";
+  const after = `${locked ? "It asks for a password, a new one once this deploy is live, shown beside its Preview link in Bops. " : ""}${publish}`;
   const more = said ? ` ${said}` : "";
   if (deployed.length > 1) {
     const each = deployed.map((d) => (d.url ? `${d.site} at ${d.url}` : d.site));
@@ -5180,7 +5508,7 @@ export function hostedAppsLine(botId: string): string {
   const copies = shared ? ` When more bots work on one app, each works in a copy of its own with Locals of its own, and all commit to the same main: ${SYNC_WORDS} Never change another bot's copy.` : "";
   return [
     `Your workspace's apps on the web, each an Ingot repo, its source: ${apps.map(one).join("; ")}.`,
-    `Each has the three environments Your Apps shows, and one command acts on each, the same as its buttons there: Local, the live view while you work (its working folder as a dev server with hot reload on its bot's computer, each site at its own http://localhost:<port>, the same on its computer's screens and beside this chat, where ${owner} watches it): local_app starts, stops or reads it. Preview, its fixed link to test and share (Deploy in Your Apps): deploy_app puts a commit there. It asks for a password unless ${owner} turned it off (${owner} sees it beside the Preview link in Bops; you never have it, so never write one in this chat or ask for it). Published, its production (Publish in Your Apps): deploy_app with where prod puts what Preview serves there, on its own domain, or for an app whose production is on GitHub, into its folder there, whose own workflow deploys it. Publish only when ${owner}'s or an Admin's own words ask for it.`,
+    `Each has the three environments Your Apps shows, and one command acts on each, the same as its buttons there: Local, the live view while you work (its working folder as a dev server with hot reload on its bot's computer, each site at its own http://localhost:<port>, the same on its computer's screens and beside this chat, where ${owner} watches it): local_app starts, stops or reads it. Preview, its fixed link to test and share (Update preview in Your Apps): deploy_app puts a commit there. It asks for a password unless ${owner} turned it off (${owner} sees it beside the Preview link in Bops; you never have it, so never write one in this chat or ask for it). Published, its production (Publish in Your Apps): deploy_app with where prod puts what Preview serves there, on its own domain, or for an app whose production is on GitHub, into its folder there, whose own workflow deploys it. Publish only when ${owner}'s or an Admin's own words ask for it.`,
     `When ${owner} asks for any change to an app, call work_on_app at once, with no question first: it makes the change in its working folder, commits it to Ingot and deploys that commit to its Preview, then says the link and what changed, so ${owner} can test it there. Never ask whether you may use Ingot, make a draft or deploy a preview: only publishing waits for their words. Change an app only that way: never through GitHub (its API, a branch, a pull request, change_files) or by calling Orgo yourself, even when its production is on GitHub. Never open a Preview link to check it (its password page answers 401): check your work on Local. Say the environment and its address when you point ${owner} at one.${copies}${repos ? ` ${repos}` : ""}`,
   ].join("\n");
 }

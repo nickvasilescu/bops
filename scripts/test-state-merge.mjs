@@ -11,7 +11,9 @@
 // that runs it (Session.by), with the replies and steps of both and a stop, a move to the Mac or a dismiss
 // asked from elsewhere. A thread, routine or watch kept between us (secret) on either side stays so,
 // whichever side's copy wins: a merge never takes the mark back. A bot's How I work changed on one side only is that side's
-// (an Admin's that Bops Cloud kept never loses to the Mac's older words). Anything else changed on both sides still keeps the merging side's copy whole.
+// (an Admin's that Bops Cloud kept never loses to the Mac's older words), and so is a Preview password only Bops Cloud
+// writes (Workspace.previewPasswords), which the Mac's next save carries as it was. Anything else changed on both sides
+// still keeps the merging side's copy whole.
 //
 // Pure functions: nothing reaches Bops Cloud.
 // Usage: node scripts/test-state-merge.mjs
@@ -575,6 +577,31 @@ check("an older Bops's kept copy keeps the team chart it doesn't know, and never
   assert.deepEqual(M.merge3(base, odd, newer, OLD).workspaces[0].chain, newer.workspaces[0].chain);
 });
 
+/* ---------------- An app's GitHub setting: one value, kept as Bops Cloud wrote it ---------------- */
+
+check("an app's GitHub setting Bops Cloud kept (an Admin's: cloud/members.ts githubHere) stays through this Mac's save of other fields of the app; changed on both it's never a mix: the side that moved where it publishes goes whole over one that only moved its point", () => {
+  const G = { repo: "example-org/web", branch: "main", path: "formula", keep: ["proxy.ts"], last: { sha: "a1", ingot: "b1", keep: ["proxy.ts"], when: 1 } };
+  const app = (more) => ({ botId: "max", computerId: "c1", previewLive: null, github: G, ...more });
+  const blob = (shop) => ({ workspaces: [{ id: "ws_acme", name: "Acme", hostedApps: { shop } }] });
+  const shopOf = (b) => b.workspaces[0].hostedApps.shop;
+  const base = blob(app());
+  const elsewhere = { repo: "example-org/other", branch: "main", path: "" };
+  // This Mac's Preview deploy moved; Bops Cloud pointed it elsewhere for an Admin (its point gone): both kept.
+  const merged = shopOf(M.merge3(base, blob(app({ previewLive: { id: "d2" } })), blob(app({ github: elsewhere }))));
+  assert.deepEqual([merged.previewLive, merged.github], [{ id: "d2" }, elsewhere]);
+  // This Mac published meanwhile (its point moved): the new destination goes whole, never with the old repo's point.
+  const published = { ...G, last: { sha: "c1", ingot: "d1", keep: ["proxy.ts"], when: 2 } };
+  assert.deepEqual(shopOf(M.merge3(base, blob(app({ github: published })), blob(app({ github: elsewhere })))).github, elsewhere);
+  assert.deepEqual(shopOf(M.merge3(base, blob(app({ github: elsewhere })), blob(app({ github: published })))).github, elsewhere, "whichever side merges");
+  // Back on Orgo (removed) while this Mac moved the point: removed.
+  assert.equal(shopOf(M.merge3(base, blob(app({ github: published })), blob(app({ github: undefined })))).github, undefined);
+  // Both moved only the point (this Mac published, the app's computer brought GitHub's changes in): one side's whole,
+  // never one's commit with the other's changeset: this Mac's, an older Bops's theirs.
+  const pulled = { ...G, last: { sha: "e1", ingot: "f1", keep: ["proxy.ts"], when: 3 } };
+  assert.deepEqual(shopOf(M.merge3(base, blob(app({ github: published })), blob(app({ github: pulled })))).github, published);
+  assert.deepEqual(shopOf(M.merge3(base, blob(app({ github: published })), blob(app({ github: pulled })), OLD)).github, pulled);
+});
+
 /* ---------------- A bot's settings page: kept on its workspace, by bot id ---------------- */
 
 check("a bot's settings page settings (Workspace.botSettings): two Macs setting different bots keep both, field by field", () => {
@@ -660,6 +687,33 @@ check("a bot's settings page settings (Workspace.botSettings): two Macs setting 
     const r = M.merge3(clone(base), clone(base), older);
     assert.equal(appsOf(r), undefined, "reads as none");
     assert.equal(M.keepAppsLevels([{ id: "x", memberAccess: { [AVA]: { others: "none", bots: {}, invite: true } } }], [[{ id: "x", memberAccess: { [AVA]: { others: "none", bots: {}, invite: true, apps: "read" } } }]])[0].memberAccess[AVA].apps, "read", "from a copy that was an invite too");
+  });
+}
+
+{
+  // Workspace.previewPasswords: only Bops Cloud writes it (cloud/preview-passwords.ts); the owner's Mac carries it along.
+  const clone = (x) => JSON.parse(JSON.stringify(x));
+  const kept = { "shop/shop": { url: "https://k7p2qxm4wr3d.orgo.dev", password: "Kq7mZ3x", at: 5 } };
+  const blob = (extra = {}) => ({ owner: { name: "Ava" }, workspace: "ws_main", workspaces: [{ id: "ws_main", name: "Main", createdAt: 1, hostedApps: { shop: { botId: "boppy", computerId: "c1" } }, ...extra }], bots: [{ id: "boppy", isMain: true, name: "Boppy" }], chats: [] });
+  check("a Preview password Bops Cloud kept lands on the Mac's merge, and goes back up as it was with the Mac's next save", () => {
+    const base = blob();
+    const mine = clone(base);
+    mine.workspaces[0].name = "Renamed here";
+    mine.owner.name = "Ava B";
+    // Bops Cloud wrote it meanwhile (a version by "cloud"): the Mac's 409, or its read, merges it in.
+    const merged = M.merge3(clone(base), mine, blob({ previewPasswords: kept }));
+    assert.deepEqual(merged.workspaces[0].previewPasswords, kept);
+    assert.equal(merged.workspaces[0].name, "Renamed here");
+    // Its next save over that (the merged blob is its base now): still there, as Bops Cloud wrote it.
+    const later = clone(merged);
+    later.owner.name = "Ava C";
+    const up = M.toShared(M.fromShared(later, "mac_a"), "mac_a");
+    assert.deepEqual(up.workspaces[0].previewPasswords, kept);
+    // A newer one from Bops Cloud over the Mac's copy of the older one: the newer one.
+    const newer = { "shop/shop": { ...kept["shop/shop"], password: "Wq4tY7p", at: 9 } };
+    assert.deepEqual(M.merge3(clone(merged), clone(merged), blob({ previewPasswords: newer })).workspaces[0].previewPasswords, newer);
+    // Taken out there (turned off): out here too.
+    assert.equal(M.merge3(clone(merged), clone(merged), blob()).workspaces[0].previewPasswords, undefined);
   });
 }
 

@@ -1,5 +1,7 @@
 "use client";
 
+import { Pencil, Plus, Trash2, X } from "lucide-react";
+import { appIcon } from "./app-controls";
 import { useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ENV_NAME, ENV_RESERVED, isAppName, isSiteName, MAX_SITES, offersInOrder, REGISTRANT_FIELDS, subdomainTyped, typedAppName } from "@/lib/hosted-apps";
 import type {
@@ -33,10 +35,11 @@ import type {
   WorkspaceDomainsAnswer,
   WorkspaceZoneAnswer,
 } from "@/lib/hosted-apps";
-import { PencilIcon, rowIconBtn, rowTrashBtn, TrashIcon } from "./apps";
+import { rowIconBtn, rowTrashBtn } from "./apps";
 import { act, AppEnvCtx, AppSite, CopyLink, envQuery, isSending, PILL, QUIET, removeApp, short, siteQuery, STATES, UrlLink, useSending } from "./hosted-apps";
 import { InlineConfirm, undash } from "./side-group";
 import { ago, post } from "./ui";
+import { KeyVariables } from "./app-key-links";
 
 /*
  * An app on the web's own page, beyond what hosted-apps.tsx shows of it (lib/hosted-apps.ts): Add app on the
@@ -888,9 +891,7 @@ export function AddDomain({
     );
   const closeButton = (
     <button aria-label="Close" disabled={busy} onClick={onClose} className="flex size-6 shrink-0 items-center justify-center rounded-md text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink">
-      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-        <path d="M2 2l6 6M8 2L2 8" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-      </svg>
+      <X {...appIcon}/>
     </button>
   );
   // A Published site's: Its domain, From Cloudflare first, then Use a domain I own (a small link to its own form).
@@ -999,9 +1000,7 @@ export function AddDomain({
         {tab("own", "Use a domain I own")}
         <span className="flex-1" />
         <button aria-label="Close" disabled={busy} onClick={onClose} className="flex size-6 shrink-0 items-center justify-center rounded-md text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink">
-          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-            <path d="M2 2l6 6M8 2L2 8" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-          </svg>
+          <X {...appIcon}/>
         </button>
       </div>
       {body}
@@ -1400,6 +1399,7 @@ export function AppSettingsSection({ ws, name, answer, onSaved }: { ws: string; 
         </div>
       </form>
       <Variables ws={ws} name={name} names={answer.env} onSaved={(names) => onSaved({ ...answer, env: names })} first={first} lacks={answer.prodEnv?.filter((x) => !answer.env.includes(x))} />
+      <KeyVariables app={name} />
     </div>
   );
 }
@@ -1532,7 +1532,7 @@ export function Variables({ ws, name, names, onSaved, first, lacks }: { ws: stri
                     }}
                     className={rowIconBtn}
                   >
-                    <PencilIcon />
+                    <Pencil {...appIcon}/>
                   </button>
                   <button
                     aria-label={`Remove ${k}`}
@@ -1545,7 +1545,7 @@ export function Variables({ ws, name, names, onSaved, first, lacks }: { ws: stri
                     }}
                     className={rowTrashBtn}
                   >
-                    <TrashIcon />
+                    <Trash2 {...appIcon}/>
                   </button>
                 </span>
               </div>
@@ -1581,9 +1581,7 @@ export function Variables({ ws, name, names, onSaved, first, lacks }: { ws: stri
           disabled={busy}
           className="-mx-2 mt-0.5 flex h-7 items-center gap-1.5 self-start rounded-lg px-2 text-[12px] leading-4 text-[#6B6B6B] hover:bg-[#F6F6F4] hover:text-ink disabled:text-[#9A9A98]"
         >
-          <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
-            <path d="M5 1.5v7M1.5 5h7" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-          </svg>
+          <Plus {...appIcon}/>
           Add variable
         </button>
       )}

@@ -1,12 +1,18 @@
 "use client";
 
+import { MoreHorizontal } from "lucide-react";
+import { statusForApp } from "@/lib/app-review";
+import type { AppCommit } from "@/lib/hosted-apps";
+import { AppPassword, AppReview } from "./app-review";
+import { appIcon } from "./app-controls";
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { allLocals, localWords, type AppDeploy, type AppEnv, type HostedApp, type HostedAppsAnswer, type HostedSite, type LocalAnswer, type LocalSite, type PreviewSite, type SiteDomain } from "@/lib/hosted-apps";
 import { readSettings, Variables } from "./app-settings";
-import { act, deploying, isSending, OpenHostedApp, PROBLEM, PULSE, short, UrlLink, useSending } from "./hosted-apps";
+import { AppEnvCtx, act, deploying, isSending, OpenHostedApp, PROBLEM, PULSE, short, UrlLink, useSending } from "./hosted-apps";
 import { useDismiss } from "./new-thread";
 import { OpenPreview } from "./panel-tabs";
-import { PasswordBeside } from "./preview-password";
+import { PasswordBeside, usePreviewPassword } from "./preview-password";
+import { GithubForm, ghFormOf, ghMirrorOf, NO_GH_FORM, type GhForm } from "./github-form";
 import { InlineConfirm, undash } from "./side-group";
 import { post } from "./ui";
 
@@ -160,7 +166,7 @@ export function whyNotEnv(answer: Pick<HostedAppsAnswer, "enabled" | "why">, a: 
   const gh = a.hosting?.github;
   if (gh) {
     if (!a.preview?.serving) return "The preview isn't live yet. Deploy a preview first.";
-    if (!gh.last) return "Link it to GitHub first, in the menu beside Publish.";
+    if (!gh.last) return "Link it to GitHub first: open Technical details, then the menu on the Published line.";
     // (Whether GitHub has this preview already is the server's to say: Publish then sends nothing.)
     return undefined;
   }
@@ -171,72 +177,8 @@ export function whyNotEnv(answer: Pick<HostedAppsAnswer, "enabled" | "why">, a: 
   return undefined;
 }
 
-/** The GitHub production form as typed: its lists as one line each ("a, b", "client=cclc"). */
-type GhForm = { repo: string; branch: string; path: string; keep: string; workflow: string; inputs: string };
-
-/** The form as the route takes it (lib/hosted-apps.ts cleanGithubMirror checks it again). */
-export function ghMirrorOf(f: GhForm) {
-  const keep = f.keep.split(",").map((x) => x.trim()).filter(Boolean);
-  const inputs = Object.fromEntries(
-    f.inputs
-      .split(",")
-      .map((x) => x.split("=").map((y) => y.trim()))
-      .filter((kv) => kv.length === 2 && kv[0])
-      .map((kv) => [kv[0], kv[1]] as const),
-  );
-  return {
-    repo: f.repo.trim(),
-    branch: f.branch.trim() || "main",
-    path: f.path.trim(),
-    ...(keep.length ? { keep } : {}),
-    ...(f.workflow.trim() ? { dispatch: { workflow: f.workflow.trim(), ...(Object.keys(inputs).length ? { inputs } : {}) } } : {}),
-  };
-}
-
-/**
- * Where an app's production is on GitHub: the repo, its branch and the app's folder in it, the files that stay in
- * Ingot alone, and a workflow to run after a push (for one that doesn't start on a push).
- */
-function GithubForm({ form, onChange, busy, onSave, onCancel, compact }: { form: GhForm; onChange: (f: GhForm) => void; busy: boolean; onSave: () => void; onCancel: () => void; compact?: boolean }) {
-  const field = (key: keyof GhForm, label: string, placeholder: string) => (
-    <label className="flex flex-col gap-1">
-      <span className="text-[11.5px] font-medium leading-4 text-[#6B6B6B]">{label}</span>
-      <input
-        data-gh-field={key}
-        value={form[key]}
-        placeholder={placeholder}
-        onChange={(e) => onChange({ ...form, [key]: e.target.value })}
-        className="h-8 rounded-[8px] bg-white px-2.5 text-[12.5px] leading-4 text-ink shadow-[0_0_0_1px_#E2E2DF] outline-none placeholder:text-[#B0B0AE] focus:shadow-[0_0_0_1.5px_#0A0A0A]"
-      />
-    </label>
-  );
-  return (
-    <div data-gh-form className={`${compact ? "pl-[26px] pr-2" : ""} pt-2`} onClick={(e) => e.stopPropagation()}>
-      <div className="flex flex-col gap-2.5 rounded-[12px] bg-[#F7F7F6] p-3">
-        <span className="text-[12.5px] font-semibold leading-4 text-ink">Publish to GitHub</span>
-        <span className="text-[12px] leading-[17px] text-[#6B6B6B]">
-          Ingot stays where it&apos;s worked on and previewed. Publish pushes what the Preview serves into this folder, with your GitHub key in Keys, and that repo&apos;s own workflow deploys it.
-        </span>
-        <div className="grid grid-cols-1 gap-2 @[420px]:grid-cols-3">
-          {field("repo", "Repo", "OrgoAI/orgo-brandlord")}
-          {field("branch", "Branch", "main")}
-          {field("path", "Folder in it", "formula (empty: the whole repo)")}
-        </div>
-        {field("keep", "Left alone both ways (files, or folders ending in /)", "proxy.ts, clients/other/")}
-        <div className="grid grid-cols-1 gap-2 @[420px]:grid-cols-2">
-          {field("workflow", "Workflow to run after a push (optional)", "deploy.yml")}
-          {field("inputs", "Its inputs", "client=cclc")}
-        </div>
-        <div className="flex items-center gap-2">
-          <Btn tag="gh-save" dark label="Save" doing="Saving…" busy={busy} why={form.repo.trim() ? undefined : "Which repo?"} onClick={onSave} />
-          <button onClick={onCancel} className="text-[12.5px] leading-4 text-[#6B6B6B] hover:text-ink">
-            Cancel
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
+/* Where its production is on GitHub, as a form: components/app/github-form.tsx (a shared workspace's Your Apps has it too). */
+export { ghMirrorOf } from "./github-form";
 
 /** One line: its environment, state, where it is and what it serves; a Local's of a bot's copy (`bot`), with whose it is (`who`). */
 type Line = { env: AppEnv; state: EnvState; where: ReactNode; at: string | null; bot?: string; who?: string };
@@ -259,7 +201,13 @@ export function AppEnvs({
   onPick,
   onDomain,
   compact,
+  commits = [],
+  history,
+  historyOpen = false,
 }: {
+  historyOpen?: boolean;
+  commits?: AppCommit[];
+  history?: ReactNode;
   ws: string;
   answer: Pick<HostedAppsAnswer, "enabled" | "why">;
   app: HostedApp;
@@ -297,10 +245,10 @@ export function AppEnvs({
     if (r.app) onChanged(r.app);
     if (r.error) setError(undash(r.error));
     if (r.said) setSaid(undash(r.said));
+    return !r.error;
   };
   const deploy = () => run("preview", () => act(app.name, { ws, action: "deploy", env: "preview", ...(site ? { site } : {}) }));
-  const promote = () => {
-    const at = app.preview?.serving;
+  const promote = (at = app.preview?.serving) => {
     return run("promote", () => act(app.name, site && at ? { ws, action: "promote", site, at } : !many && at ? { ws, action: "promote", site: app.name, at } : { ws, action: "promote" }));
   };
   /** Apply variables: Published's own changeset built again, with its variables as they are now. */
@@ -367,7 +315,7 @@ export function AppEnvs({
     return run("github", async () => {
       const r = await act(app.name, { ws, action: "github", github: v ? ghMirrorOf(v) : null });
       if (r.app) setGhForm(null);
-      return r.app ? { ...r, said: v ? "Saved. Link it to GitHub next, in the menu beside Publish." : "Publish deploys on Orgo again." } : r;
+      return r.app ? { ...r, said: v ? "Saved. Link it to GitHub next, from the menu on the Published line in Technical details." : "Publish deploys on Orgo again." } : r;
     });
   };
   // GitHub's changes into Ingot, GitHub's version winning where both changed a file (what Publish's conflict says to do).
@@ -427,7 +375,7 @@ export function AppEnvs({
   const prodState: EnvState = gh
     ? gh.last
       ? { word: "On GitHub", dot: DOTS.on, tip: `Publish pushes what the Preview serves to ${gh.repo} ${gh.branch}, where its own workflow deploys it.` }
-      : { word: "Not linked", dot: DOTS.off, tip: "Link it to GitHub in the menu beside Publish." }
+      : { word: "Not linked", dot: DOTS.off, tip: "Link it to GitHub from the menu on this line." }
     : lost ?? (noDomain && neverLive ? { word: "Not published", dot: DOTS.off } : (() => {
     const st = many && !site ? allSites(sites) : deployState(app);
     return st.word === "Not deployed yet" ? { ...st, word: "Not published" } : st;
@@ -476,27 +424,22 @@ export function AppEnvs({
       const k = bot ? `:${bot}` : "";
       return up ? (
         <>
-          <Btn tag="local-open" label="Open preview" doing="Opening…" busy={busy === `local:open${k}`} why={why} onClick={() => void preview(bot)} />
+          <Btn tag="local-open" label="Open working copy" doing="Opening…" busy={busy === `local:open${k}`} why={why} onClick={() => void preview(bot)} />
           <Btn tag="local-stop" label="Stop" doing="Stopping…" busy={busy === `local:stop${k}`} why={why} onClick={() => void localDo("stop", bot)} />
         </>
       ) : (
         <Btn tag="local-start" label="Start" doing="Starting…" busy={busy === `local:start${k}`} why={why} onClick={() => void localDo("start", bot)} />
       );
     }
-    if (env === "preview") return <Btn tag="deploy" label="Deploy" doing="Deploying…" busy={busy === "preview"} why={whyNotEnv(answer, app, "preview", sites)} onClick={() => void deploy()} />;
+    if (env === "preview") return <Btn tag="deploy" label="Update preview" doing="Deploying…" busy={busy === "preview"} why={whyNotEnv(answer, app, "preview", sites)} onClick={() => void deploy()} />;
     // No domain and never live: connecting one comes first (Published lives on its domain only).
     if (!gh && !lost && noDomain && neverLive && answer.enabled)
       return <Btn tag="connect-domain" dark label="Connect a domain" onClick={domainFlow} />;
     return (
       <>
-        <Btn tag="promote" dark label={gh ? "Publish to GitHub" : "Publish"} doing={gh ? "Pushing…" : "Publishing…"} busy={busy === "promote" || busy === "reapply"} why={whyNotEnv(answer, app, "prod", sites)} onClick={() => void promote()} />
         <div ref={menuBox} className="relative flex shrink-0" onClick={(e) => e.stopPropagation()}>
           <button data-prod-menu aria-label="More for Published" aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu(!menu)} className="flex size-6 items-center justify-center rounded-md text-[#6B6B6B] hover:bg-black/[0.05] hover:text-ink">
-            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden>
-              <circle cx="2.5" cy="6" r="1.1" fill="currentColor" />
-              <circle cx="6" cy="6" r="1.1" fill="currentColor" />
-              <circle cx="9.5" cy="6" r="1.1" fill="currentColor" />
-            </svg>
+<MoreHorizontal {...appIcon}/>
           </button>
           {menu && gh && (
             <div role="menu" aria-label="Published" className="absolute right-0 top-[calc(100%+4px)] z-20 flex min-w-[200px] flex-col rounded-[12px] bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_32px_-12px_#00000040]">
@@ -508,7 +451,7 @@ export function AppEnvs({
                   Bring in GitHub&apos;s changes
                 </button>
               )}
-              <button data-gh-edit role="menuitem" onClick={() => (setMenu(false), setGhForm({ repo: gh.repo, branch: gh.branch, path: gh.path, keep: (gh.keep ?? []).join(", "), workflow: gh.dispatch?.workflow ?? "", inputs: Object.entries(gh.dispatch?.inputs ?? {}).map(([k, v]) => `${k}=${v}`).join(", ") }))} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
+              <button data-gh-edit role="menuitem" onClick={() => (setMenu(false), setGhForm(ghFormOf(gh)))} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
                 GitHub settings
               </button>
               <button data-gh-off role="menuitem" onClick={() => void githubSet(null)} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
@@ -518,7 +461,7 @@ export function AppEnvs({
           )}
           {menu && !gh && (
             <div role="menu" aria-label="Published" className="absolute right-0 top-[calc(100%+4px)] z-20 flex min-w-[180px] flex-col rounded-[12px] bg-white p-1 shadow-[0_0_0_1px_#0000000F,0_12px_32px_-12px_#00000040]">
-              <button data-gh-start role="menuitem" onClick={() => (setMenu(false), setGhForm({ repo: "", branch: "main", path: "", keep: "", workflow: "", inputs: "" }))} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
+              <button data-gh-start role="menuitem" onClick={() => (setMenu(false), setGhForm({ ...NO_GH_FORM }))} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4]">
                 Publish to GitHub instead
               </button>
               <button data-rollback role="menuitem" disabled={!app.serving} onClick={() => void rollbackAsk()} className="rounded-lg px-2.5 py-1.5 text-left text-[12.5px] leading-4 text-ink hover:bg-[#F6F6F4] disabled:text-[#9A9A98]">
@@ -538,7 +481,7 @@ export function AppEnvs({
   };
   // Lines named for their bots (more bots work on it): a wider column for the names, so the states line up.
   const named = lines.some((l) => l.who);
-  return (
+  const advanced = (
     // (Its lines read the width they have, not the window's: the Apps page's, or its tab's in a panel. Its menu open, it's over the lines after it.)
     <div data-app-envs className={`@container flex flex-col ${compact ? "" : "gap-0.5"} ${menu ? "relative z-10" : ""}`}>
       {!compact && <span className="pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]">Local, Preview and Published</span>}
@@ -557,7 +500,7 @@ export function AppEnvs({
             >
               {/* Its place: its dot, its name, and whose it is (Local · Nova). Wide, a column of its own; narrow, what's left of the first line. */}
               <span data-app-env-place className={`flex min-w-0 flex-1 items-center gap-2 @2xl:flex-none ${named ? "@2xl:w-[134px]" : "@2xl:w-[84px]"}`}>
-                <span data-tip={l.state.tip ?? l.state.word} className={`size-1.5 shrink-0 rounded-full ${l.state.dot}`} />
+
                 <span className="flex min-w-0 items-center gap-1 text-[12.5px] leading-4 text-ink">
                   {onPick ? (
                     <button aria-pressed={isPicked} className={`shrink-0 whitespace-nowrap text-left ${isPicked ? "font-semibold" : "font-medium"}`}>
@@ -629,6 +572,23 @@ export function AppEnvs({
       {busy === "rollback-read" && <span className={`text-[12px] leading-4 text-[#9A9A98] ${compact ? "pl-[26px]" : ""}`}>Reading its deploys…</span>}
     </div>
   );
+  const pass = usePreviewPassword(ws, app.name, site, app.preview);
+  const status = statusForApp(app, commits);
+  const publishTo = domain ?? pending?.domain ?? app.hosting?.url ?? "No domain yet";
+  const liveAt = gh ? gh.last?.ingot ?? null : app.serving;
+  return <><AppReview status={status} previewUrl={app.preview?.off ? null : app.preview?.url ?? null} liveUrl={domain} previewAt={app.preview?.serving ?? null} publishedAt={liveAt} versions={commits} github={!!gh}
+    publishLine={!gh && publishTo === "No domain yet" ? "Publishes this reviewed version on Orgo. No domain is connected yet." : !gh && pending && !shownSites.some(x => x.domains?.some(d => d.status === "active")) ? "Publishes this reviewed version on Orgo. Visitors will see it once the domain points here." : undefined}
+    destination={gh ? `${gh.repo} · ${gh.branch}${gh.path ? ` · ${gh.path}/` : ""}` : publishTo}
+    env={picked === "prod" ? "prod" : "preview"} onEnv={onPick} busy={!!busy}
+    password={pass.on ? <AppPassword password={pass.password} waiting={pass.waiting === "Reading…"} error={pass.error ?? pass.waiting}/> : undefined}
+    whyUpdate={whyNotEnv(answer, app, "preview", sites)} whyPublish={status.action === "connect-domain" ? undefined : whyNotEnv(answer, app, "prod", sites)}
+    onUpdate={() => void deploy()} onPublish={at => promote(at)} onDomain={domainFlow} history={history} historyOpen={historyOpen}
+    technical={<div data-technical-details className="flex flex-col gap-4 rounded-xl bg-desk p-4 text-[13px] leading-[18px]">
+      <dl className="grid grid-cols-[90px_minmax(0,1fr)] gap-x-3 gap-y-2"><dt className="text-pencil">Preview URL</dt><dd className="break-all">{app.preview?.url ?? "No preview yet"}</dd><dt className="text-pencil">Version</dt><dd className="break-all">{app.preview?.serving ?? "None"}</dd><dt className="text-pencil">Publish to</dt><dd className="break-all">{gh ? ghWhere : publishTo}</dd></dl>
+      <p className="text-pencil">Local is the bot&apos;s working copy. Update preview creates the separate copy you review.</p>
+      {advanced}
+      <AppEnvCtx.Provider value="local"><LocalSection ws={ws} app={app} site={site} local={local} onLocal={onLocal}/></AppEnvCtx.Provider>
+    </div>}/>{error && <span role="alert" className={PROBLEM}>{error}</span>}{said && <span role="status" className="text-[13px] text-pencil">{said}</span>}</>;
 }
 
 const HEAD = "pb-1 text-[12px] font-semibold leading-4 text-[#6B6B6B]";
@@ -703,7 +663,6 @@ export function LocalSection({ ws, app, site, local, onLocal }: { ws: string; ap
         <span className={HEAD}>Local</span>
         <span className={HINT}>{`Runs its working folder with hot reload, at ${at ? `localhost:${at}` : "a localhost address of its own"} here and on its computer.`}</span>
         <div className="flex min-h-8 items-center gap-2">
-          <span className={`size-1.5 shrink-0 rounded-full ${s.dot}`} />
           <span data-local-state className="text-[12.5px] leading-4 text-ink">
             {s.word}
           </span>

@@ -241,6 +241,8 @@ export async function sharedFileTarget(botId: string, { screen = false } = {}): 
 export function sharedKeysOpen(): {
   projectId: string;
   keys: boolean;
+  /** Your Apps at Write: who may link a key to one app (lib/server/app-keys.ts). */
+  appsWrite: boolean;
   keyActs: boolean;
   keyNames: SharedKey[];
   bots: { id: string; keys: string[] }[];
@@ -253,10 +255,29 @@ export function sharedKeysOpen(): {
   return {
     projectId: open.at.projectId,
     keys: s.keys === true,
+    appsWrite: s.apps?.level === "write",
     keyActs: s.keyActs === true,
     keyNames: s.keys && Array.isArray(s.keyNames) ? s.keyNames : [],
     bots: s.bots.flatMap((b) => (typeof b.id === "string" ? [{ id: b.id, keys: s.keys ? switchedKeys(b, acts) : [] }] : [])),
     refresh: () => open.copy.refresh(),
+  };
+}
+
+/**
+ * The shared workspace open now, for its skills (lib/server/shared-skills.ts): its Orgo project (never an id from a
+ * request), the user's role and what they may change there (SharedWsSlice.can), and its bots. Null when none is open for
+ * the signed-in user.
+ */
+export function sharedSkillsOpen(): { projectId: string; name: string; role: "admin" | "member"; can: string[]; botIds: string[] } | null {
+  const open = openNow();
+  if (!open || (open.at.role !== "admin" && open.at.role !== "member")) return null;
+  const s = open.data?.state;
+  return {
+    projectId: open.at.projectId,
+    name: open.at.name,
+    role: open.at.role,
+    can: Array.isArray(s?.can) ? s.can.filter((x): x is string => typeof x === "string") : [],
+    botIds: (Array.isArray(s?.bots) ? s.bots : []).flatMap((b) => (typeof b?.id === "string" ? [b.id] : [])),
   };
 }
 

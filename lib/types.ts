@@ -362,6 +362,16 @@ export type Workspace = {
    */
   appsForMembers?: AppsForMembers;
   /**
+   * Each site's newest Preview password, by "<app>/<site>" (the app's own site named as the app): the link it's for, the
+   * password, and when Bops Cloud took it, by its clock. Only Bops Cloud writes it, as whoever set the password tells it
+   * (cloud/preview-passwords.ts: this Mac, or the app's own computer's runner, which can set one but never read one
+   * back: lib/server/preview-password-share.ts), so people with Your Apps at Write get each new one whether this Mac is
+   * on or not (cloud/ws-slice.ts appsFor). This Mac only carries it along, and tells Bops Cloud what Orgo has where a
+   * share missed (lib/server/apps-for-members.ts fixCloudCopy): never in a bot's chat or prompt, never read
+   * by a computer (cloud/computer-scope.ts forComputer), and never in a window that doesn't show apps (lib/apps-access.ts).
+   */
+  previewPasswords?: Record<string, { url: string; password: string; at: number }>;
+  /**
    * The keys this workspace's bots see (lib/server/keys.ts keysOf), by name and whose, as this Mac last read the vault:
    * what people with Keys are shown (cloud/ws-slice.ts keyNamesOf), so they switch bots on and off for any of them. Only
    * there while anyone else is in the workspace (lib/server/keys.ts seeKeysFor); never a value. A Bops from before never
@@ -484,9 +494,11 @@ export type ScriptApproval = {
   synced?: boolean;
   /**
    * Made in a Bops window by the person signed in (approveScript), not taken from Orgo. One taken from
-   * Orgo counts only while Orgo says that person made it: another member's approval never runs a script here.
+   * Orgo counts only while Orgo says the owner or an Admin made it: a Member's approval never runs a script here.
    */
   inBops?: boolean;
+  /** Whose it was, as Orgo said when it was taken from there: the owner's or an Admin's (lib/server/workspace-skills.ts approvalCounts). */
+  by?: "owner" | "admin";
 };
 
 export type WorkspaceLine = {
@@ -958,7 +970,16 @@ export type Message = {
    * Nothing changes until the owner presses Accept in the window (lib/server/skill-proposals.ts).
    */
   skillProposals?: SkillProposal[];
+  /**
+   * Set on a bot's message: skills it saved as drafts this turn (chat.ts create_skill), each a card under the message
+   * that opens it in Skills, in Knowledge, to read and publish (components/app/skill-drafts.tsx). Publishing is a
+   * person's, there, with their own sign in: the owner, or an Admin of a shared workspace.
+   */
+  skillDrafts?: SkillDraftNote[];
 };
+
+/** A skill a bot saved as a draft (Message.skillDrafts): which one, to open in Skills. */
+export type SkillDraftNote = { kind: SkillKind; slug: string; name: string };
 
 /**
  * A reply a bot wrote for the user, to an email, a Slack message or a Discord message it read with the user's
@@ -2284,7 +2305,17 @@ export type AppApproval = {
  * its base's), which the yes builds on, and each file, added, changed or deleted, with its new size: only these go in.
  * `mode`: a file that runs (git's 100755) as it was on that commit, which the yes keeps; any other is written 100644.
  */
-export type FileChange = { repo: string; branch: string; base?: string; at: string; files: { path: string; op: "add" | "change" | "delete"; bytes?: number; mode?: "100755" }[] };
+export type FileChange = {
+  repo: string;
+  branch: string;
+  base?: string;
+  at: string;
+  /**
+   * `image`: a picture from the chat goes there, byte for byte: the copy the card shows (an upload on this Mac, `id`), the
+   * link a person wrote it at (`url`) when it came from one, and its size in pixels (`w`, `h`) as its own header says.
+   */
+  files: { path: string; op: "add" | "change" | "delete"; bytes?: number; mode?: "100755"; image?: { id?: string; url?: string; w?: number; h?: number } }[];
+};
 
 /** How the user answers a request (OpenCode's reply, Codex's ReviewDecision approved / approved_for_session / denied). */
 export type AskReply = "once" | "always" | "reject";

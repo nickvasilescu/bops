@@ -6,7 +6,8 @@
 // schedule tool as a lookup (every with hours, a time that passed today moved to tomorrow, refusals in
 // plain words, where results go: text, a channel, by default back where the user asked), manage_routine
 // (run now, pause; Run now asked in Slack bringing a task's result back there, never one from the app
-// or another message), skills (the list in the instructions, read_skill, create_skill only on the user's
+// or another message; a publish asked in Slack answered there once, its Published line kept in Bops),
+// skills (the list in the instructions, read_skill, create_skill only on the user's
 // own say, start_task following one), the watch tool's web pages, what a turn someone else started can't do
 // (no routines, watches, skills or bots; no address in a task they didn't write), markdown links made
 // plain for texts and channels, the instructions (the new rules in, the old contradictions out, How I work,
@@ -104,10 +105,11 @@ const MAIL_AT = "2026-10-13T12:00:00.000Z";
 const email = (id, o) => ({ inbox_id: "in_1", thread_id: o.thread ?? `th_${id}`, message_id: id, labels: o.labels ?? ["received"], timestamp: MAIL_AT, from: o.from ?? "Jordan <jordan@acme.example>", to: o.to ?? ["boppy@bops.bot"], subject: o.subject ?? "Links", preview: o.preview ?? (o.text ?? "").slice(0, 200), text: o.text ?? o.preview ?? "", size: 100, updated_at: MAIL_AT, created_at: MAIL_AT });
 /**
  * Composio (composio.ts), only for the actions a test puts in `cx.tools`: each one's app, tags and answer (a function of
- * its inputs: { data } or { error }). `cx.ran` is every action that ran, with its account and inputs. Anything else is
- * offline, as before.
+ * its inputs: { data } or { error }). `cx.ran` is every action that ran, with its account and inputs. While a test sets
+ * `cx.posts` to a list, a bot's Slack post (channels.ts slackPost, through Composio's proxy) lands there and goes. Anything
+ * else is offline, as before.
  */
-const cx = { tools: {}, ran: [] };
+const cx = { tools: {}, ran: [], posts: null };
 const cxTool = (slug, t) => ({ slug, name: slug, description: slug, tags: t.tags ?? [], toolkit: { slug: t.app, name: t.app, logo: "" }, input_parameters: { type: "object", properties: {} }, output_parameters: {}, version: "1", available_versions: ["1"], no_auth: false, scopes: [], is_deprecated: false, deprecated: { displayName: slug, version: "1", available_versions: ["1"], toolkit: { logo: "" }, is_deprecated: false } });
 globalThis.fetch = async (input, init) => {
   const req = new Request(input, init);
@@ -122,6 +124,11 @@ globalThis.fetch = async (input, init) => {
       cx.ran.push({ slug: execute, account: body.connected_account_id, args: body.arguments });
       const out = (await t.answer?.(body.arguments)) ?? { data: {} };
       return json({ data: out.data ?? {}, error: out.error ?? null, successful: !out.error, log_id: "log_1" });
+    }
+    if (cx.posts && /^\/api\/v3(?:\.1)?\/tools\/execute\/proxy$/.test(url.pathname)) {
+      const body = JSON.parse(await req.text());
+      cx.posts.push({ endpoint: body.endpoint, ...body.body });
+      return json({ status: 200, data: { ok: true }, headers: {} });
     }
   }
   if (url.origin === "https://api.agentmail.to") {
@@ -972,14 +979,17 @@ await check("read_skill, create_skill (a draft), update_skill, and start_task fo
   assert.equal(t.out(1), 'No skill called "Taxes". Your labels: Apps and source control (7), Finance (1). Open one with read_skill and label to see its skills.');
   assert.equal(skillNamed("Weekly invoice summary").uses, 1, "a read counts as a use");
   const v = await turnWith("remember how you post the standup", [toolCall("create_skill", { name: "Standup post", description: "When Alex asks for \"the standup notes\"", steps: "1. Read yesterday's chat.\n2. Post three lines.", pitfalls: null })]);
-  assert.equal(v.out(), 'Saved "Standup post" as a draft. Alex can publish it in Skills, in Knowledge; then you\'ll use it.');
+  assert.equal(v.out(), 'Saved "Standup post" as a draft. Alex or an Admin can read it and publish it in Skills, in Knowledge (the card under your answer opens it there); then you\'ll use it.');
+  // Its card under the answer: which one, to open in Skills (never a publish of its own).
+  assert.deepEqual(messages().findLast((m) => m.role === "bot").skillDrafts, [{ kind: "skill", slug: "standup-post", name: "Standup post" }]);
   assert.equal(skillNamed("Standup post").from.chatId, chatId);
   assert.equal(skillNamed("Standup post").status, "draft", "a bot's skill is a draft until Alex publishes it");
   assert.deepEqual(skillNamed("Standup post").botIds, ["boppy"]);
   assert.ok(!W.skillsNote("boppy").includes("Standup post"), "a draft isn't in its list yet");
   assert.equal(messages().findLast((m) => m.role === "system").text, 'Saved the skill "Standup post" as a draft');
   const w = await turnWith("update that skill: just post three lines", [toolCall("update_skill", { name: "standup post", description: "When Alex asks for standup notes", steps: "1. Post three lines.", pitfalls: null })]);
-  assert.match(w.out(), /^Updated "/);
+  assert.match(w.out(), /^Updated "[Ss]tandup post" as a draft\. Alex can publish it in Skills, in Knowledge; then you'll use it\.$/, `a change to one is the owner's to publish: ${w.out()}`);
+  assert.equal(messages().findLast((m) => m.role === "bot").skillDrafts, undefined, "no card for a change");
   const w0 = await turnWith("update that skill: the payroll one", [toolCall("update_skill", { name: "Payroll", description: "x", steps: "1. x", pitfalls: null })]);
   assert.equal(w0.out(), 'Not changed: you have no skill called "Payroll". Use create_skill for a new one.');
   // A secret in it: refused, said by where and what kind, never the text.
@@ -1609,6 +1619,34 @@ await check("a turn by text or in a channel sends back only its own: not a routi
   assert.equal(turnsOwn({ role: "bot", text: "An older job's result", resultOf: "s0" }, [{ id: "s1" }]), false);
 });
 
+await check("a publish asked in Slack: only the bot's answer goes back there; the Published line Bops said in the chat stays in Bops", async () => {
+  const Channels = await import(`${root}/lib/server/channels.ts`);
+  S.update((st) => {
+    st.channels = [{ id: "ch_pub", kind: "slack", botId: "boppy", handle: "Acme", owner: "U1", ownerName: "Alex", pairCode: "1", status: "live", at: 0, slack: { accountId: "ac_1", teamId: "T1", channels: [], dm: "D1" } }];
+  });
+  const published = "Published (on GitHub): recipe-box at abc1234, what its Preview serves, to GitHub acme/recipe-box main: pushed.";
+  cx.posts = [];
+  const m0 = messages().length;
+  try {
+    answers.push(() => {
+      // A publish that went, as chat.ts deploy_app says it in the chat during the turn: as Bops, an app note.
+      S.addMessage({ chatId, role: "bot", botId: "boppy", text: published, appNote: true, bops: true });
+      return response(`resp_${asked.length}`, [said("It's published on GitHub.")]);
+    });
+    await Channels.slackEventIn(["T1"], { type: "message", channel: "D1", channel_type: "im", ts: "1700000000.0002", user: "U1", text: "publish the recipe app" });
+    assert.deepEqual(
+      cx.posts.map((p) => [p.endpoint, p.channel, p.markdown_text]),
+      [["/chat.postMessage", "D1", "It's published on GitHub."]],
+      "one message back to Slack: the bot's answer, not the app note",
+    );
+    assert.equal(messages().filter((m) => m.appNote && m.bops && m.text === published).length, 1, "the Published line stays in the chat");
+    assert.ok(!messages().slice(m0).some((m) => /^Couldn't send this back/.test(m.text)), "it went");
+  } finally {
+    cx.posts = null;
+    S.update((st) => (st.channels = []));
+  }
+});
+
 /* ---------------- Replies to send (draft_reply: lib/server/reply-drafts.ts) ---------------- */
 
 const Drafts = await import(`${root}/lib/server/reply-drafts.ts`);
@@ -2107,6 +2145,8 @@ await check("an Admin's turn (MemberTurn.role) has every bot and Your Apps at Wr
       await Chat.handleMessage(chatId, "can you change the site?", undefined, undefined, undefined, undefined, undefined, undefined, undefined, { ...ivy, ref, role: "admin" });
       assert.ok(asked[n], `answered with ${tag}`);
       for (const tool of appTools) assert.ok(toolNames(asked[n]).includes(tool), `${tag}: ${tool}`);
+      // An Admin's turn keeps create_skill and update_skill (an Admin can do everything but delete the workspace or pay).
+      for (const tool of ["create_skill", "update_skill"]) assert.ok(toolNames(asked[n]).includes(tool), `${tag}: ${tool}`);
       const kept = messages().find((m) => m.member?.ref === ref);
       assert.deepEqual(kept.member, { ...ivy, ref }, "the role isn't kept on the message");
       // A computer's runner (runner-chat.ts answerMessage): a message Bops Cloud wrote, answered as an Admin's.
@@ -2670,7 +2710,7 @@ await check("the owner's turn on the bot's computer: its apps on the web and its
   const { runInTurn } = await import(`${root}/lib/server/turn-context.ts`);
   // A stand in for orgo-web's skills route: what each POST asked, answered as the test says.
   const posts = [];
-  let answer = { status: 201, json: { skill: { id: "sk_1", name: "Weekly recap" } } };
+  let answer = { status: 201, json: { skill: { id: "sk_1", slug: "weekly-recap", name: "Weekly recap" } } };
   orgoFake.handle = async (req) => {
     const u = new URL(req.url);
     // (Anything else this turn asks of orgo-web, its keys say: not found.)
@@ -2699,7 +2739,9 @@ await check("the owner's turn on the bot's computer: its apps on the web and its
     const names = toolNames(t.first);
     for (const x of ["work_on_app", "deploy_app", "local_app", "create_skill", "update_skill", "propose_skill_change", "start_task"]) assert.ok(names.includes(x), `has ${x}`);
     for (const x of ["schedule", "manage_routine", "watch", "make_page", "make_image", "make_app", "change_app", "create_bot"]) assert.ok(!names.includes(x), `no ${x}`);
-    assert.equal(t.out(), "Saved \"Weekly recap\" as a draft in your workspace's skills. Alex can publish it in Skills, in Knowledge; then you'll use it.");
+    assert.equal(t.out(), "Saved \"Weekly recap\" as a draft in your workspace's skills. Alex or an Admin can read it and publish it in Skills, in Knowledge (the card under your answer opens it there); then you'll use it.");
+    // Its card under the answer, by Orgo's slug for it.
+    assert.deepEqual(messages().findLast((m) => m.role === "bot").skillDrafts, [{ kind: "skill", slug: "weekly-recap", name: "Weekly recap" }]);
     const noteOf = (req) => req.input.filter((x) => x.role === "developer").map((x) => x.content).join("\n");
     assert.match(noteOf(t.first), /not from Alex's Mac\. Your workspace's apps on the web \(Local, Preview and Published\) work from here as always\. So do skills: a new one is saved as a draft/);
     assert.equal(posts.length, 1);
